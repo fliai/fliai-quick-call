@@ -45,4 +45,4 @@ run(`git commit -m "Release v${next}"`);
 run(`git tag v${next}`);
 run("git push origin HEAD");
 run(`git push origin v${next}`);
-console.log(`\nv${next} pushed. Track the build under the repo's Actions tab; downloads appear under Releases.`);
+console.log(`\nv${next} pushed. Track the build under the repo's Actions tab; it publishes to https://cdn-quickcall.fliai.lk`);

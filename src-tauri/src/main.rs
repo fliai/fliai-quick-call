@@ -246,8 +246,11 @@ fn handle_conn(app: AppHandle, shared: Shared, mut stream: TcpStream) {
             json!({})
         }
         Msg::Call { id, name, port } => {
+            // Busy means do not disturb: no alert at all, the caller is told straight away.
             let status = shared.lock().unwrap().me.status.clone();
-            on_incoming_call(&app, &shared, clean(&id, 64), clean(&name, 40), SocketAddr::new(ip, port));
+            if status != "busy" {
+                on_incoming_call(&app, &shared, clean(&id, 64), clean(&name, 40), SocketAddr::new(ip, port));
+            }
             json!({ "status": status })
         }
         Msg::Cancel { id } => {
@@ -280,18 +283,15 @@ fn handle_conn(app: AppHandle, shared: Shared, mut stream: TcpStream) {
 fn on_incoming_call(app: &AppHandle, shared: &Shared, from_id: String, from_name: String, reply_to: SocketAddr) {
     let name = if from_name.is_empty() { "Someone".to_string() } else { from_name };
     let color = color_for(&from_id);
-    let (call_id, soft) = {
+    let call_id = {
         let mut s = shared.lock().unwrap();
         s.next_call_id += 1;
-        let call_id = s.next_call_id;
-        s.incoming = Some(Incoming { call_id, from_id, reply_to });
-        (call_id, s.me.status == "busy")
+        s.incoming = Some(Incoming { call_id: s.next_call_id, from_id, reply_to });
+        s.next_call_id
     };
     hide_overlays(app);
-    if !soft {
-        show_overlays(app, &name, &color);
-    }
-    let _ = app.emit("incoming", json!({ "name": name, "color": color, "soft": soft }));
+    show_overlays(app, &name, &color);
+    let _ = app.emit("incoming", json!({ "name": name, "color": color }));
 
     // Ring while unanswered; give up after the timeout.
     let (app, shared) = (app.clone(), shared.clone());
@@ -301,7 +301,7 @@ fn on_incoming_call(app: &AppHandle, shared: &Shared, from_id: String, from_name
             if !still {
                 return;
             }
-            if !soft && sec % RING_EVERY_SECS == 0 {
+            if sec % RING_EVERY_SECS == 0 {
                 play_sound();
             }
             thread::sleep(Duration::from_secs(1));
@@ -523,8 +523,12 @@ fn call_peer(app: AppHandle, shared: tauri::State<Shared>, id: String) {
         };
         match send(addr, &msg) {
             Ok(resp) => {
-                shared.lock().unwrap().outgoing = Some(id.clone());
                 let their = resp.get("status").and_then(Value::as_str).unwrap_or("available").to_string();
+                if their == "busy" {
+                    let _ = app.emit("reply", json!({ "name": peer_name, "answer": "busy", "color": color_for(&id) }));
+                    return;
+                }
+                shared.lock().unwrap().outgoing = Some(id.clone());
                 let _ = app.emit("outgoing", json!({ "name": peer_name, "status": their, "color": color_for(&id) }));
                 // Safety net in case their "missed" reply never arrives.
                 thread::sleep(Duration::from_secs(CALL_TIMEOUT_SECS + 5));

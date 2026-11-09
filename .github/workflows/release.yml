@@ -91,6 +91,8 @@ jobs:
       - name: Prepare files
         run: |
           cp install.sh install.ps1 dist/
+          cp install.sh dist/update.sh
+          cp install.ps1 dist/update.ps1
           printf '{"version":"%s"}\n' "${GITHUB_REF_NAME#v}" > dist/latest.json
           ls -l dist
           total=$(du -cb dist/* | tail -1 | cut -f1)
@@ -99,7 +101,7 @@ jobs:
 
       - name: Upload (installers first, then metadata and scripts)
         run: |
-          for f in fliai-quick-call.dmg fliai-quick-call-setup.exe latest.json install.sh install.ps1; do
+          for f in fliai-quick-call.dmg fliai-quick-call-setup.exe latest.json install.sh install.ps1 update.sh update.ps1; do
             case "$f" in
               *.dmg)  type=application/x-apple-diskimage ;;
               *.exe)  type=application/vnd.microsoft.portable-executable ;;
@@ -121,3 +123,24 @@ jobs:
           total=$(aws s3 ls "s3://$BUCKET/" --recursive --summarize --endpoint-url "$ENDPOINT" | awk '/Total Size/ {print $3}')
           echo "Bucket now holds $total bytes"
           if [ "$total" -gt "$MAX_BYTES" ]; then echo "Bucket is over the 50 MB budget"; exit 1; fi
+
+  # Run the real one-line install and update commands, in both Windows PowerShell 5.1 and pwsh 7.
+  verify-windows:
+    needs: publish
+    runs-on: windows-latest
+    steps:
+      - name: Install with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $out = & { irm https://cdn-quickcall.fliai.lk/install.ps1 | iex } *>&1 | Out-String
+          Write-Host $out
+          if ($out -match "Could not install") { exit 1 }
+          $v = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" | Where-Object { $_.DisplayName -eq "FLiAI Quick Call" }).DisplayVersion
+          if ("v$v" -ne $env:GITHUB_REF_NAME) { Write-Host "Installed version '$v' != $env:GITHUB_REF_NAME"; exit 1 }
+
+      - name: Update with pwsh 7 (should already be up to date)
+        shell: pwsh
+        run: |
+          $out = & { irm https://cdn-quickcall.fliai.lk/update.ps1 | iex } *>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch "already up to date") { exit 1 }

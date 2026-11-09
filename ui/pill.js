@@ -12,7 +12,7 @@ let screen = { notch: false, notchWidth: 0, notchHeight: 0 };
 let state = { me: { name: "", status: "available" }, peers: [] };
 let hovering = false;
 let editingName = false;
-let incoming = null; // { name, color, soft }
+let incoming = null; // { name, color }
 let outgoing = null; // { name, status, color }
 let notice = null;   // { name, answer, color }
 let noticeTimer = null;
@@ -68,10 +68,10 @@ function incomingHtml() {
   return `
     <div class="incoming">
       <div class="who">
-        <span class="av big ${incoming.soft ? "" : "ripple"}" style="--c:${esc(incoming.color)}">${initial(incoming.name)}</span>
+        <span class="av big ripple" style="--c:${esc(incoming.color)}">${initial(incoming.name)}</span>
         <div class="ellipsis">
           <div class="title ellipsis">${esc(incoming.name)}</div>
-          <div class="sub">${incoming.soft ? "is calling · you're Busy, so it's quiet" : "is calling you"}</div>
+          <div class="sub">is calling you</div>
         </div>
       </div>
       <div class="actions">
@@ -89,7 +89,7 @@ function openHtml() {
           <span class="dot ${p.status}"></span>
           <span class="name ellipsis">${esc(p.name)}</span>
           <span class="st">${LABEL[p.status] || ""}</span>
-          <button data-act="call" data-id="${esc(p.id)}" ${p.status === "offline" ? "disabled" : ""}>Call</button>
+          <button data-act="call" data-id="${esc(p.id)}" ${p.status === "available" ? "" : "disabled"}>Call</button>
         </div>`).join("")
     : `<div class="empty">No one yet. Teammates appear here<br>when they run FLiAI Quick Call on the same Wi-Fi.</div>`;
   const you = editingName
