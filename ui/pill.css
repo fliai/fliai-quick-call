@@ -1,0 +1,203 @@
+:root {
+  --text: #f5f5f7;
+  --muted: #98989f;
+  --line: rgba(255, 255, 255, 0.1);
+  --green: #30d158;
+  --red: #ff453a;
+  --grey: #636366;
+  --blue: #0a84ff;
+  --spring: cubic-bezier(0.3, 1.45, 0.5, 1);
+}
+
+/* Animatable custom properties: shoulder size and bottom corner radius. */
+@property --s { syntax: "<length>"; inherits: true; initial-value: 12px; }
+@property --r { syntax: "<length>"; inherits: true; initial-value: 20px; }
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  color: var(--text);
+  font: 13px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+/* ---------- the island ---------- */
+
+#island {
+  --c: var(--blue);
+  position: absolute;
+  top: 0;
+  left: 50%;
+  translate: -50% 0;
+  transform-origin: 50% 0;
+  width: 110px;
+  height: 6px;
+  background: #000;
+  border-radius: 0 0 var(--r) var(--r);
+  transition:
+    width 0.56s var(--spring),
+    height 0.56s var(--spring),
+    --r 0.45s ease,
+    --s 0.45s ease,
+    opacity 0.3s ease,
+    box-shadow 0.4s ease;
+}
+
+/* Concave "liquid" shoulders that melt the island into the screen edge. */
+#island::before,
+#island::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: var(--s);
+  height: var(--s);
+}
+#island::before {
+  left: calc(-1 * var(--s));
+  background: radial-gradient(circle at 0 100%, transparent calc(var(--s) - 0.5px), #000 var(--s));
+}
+#island::after {
+  right: calc(-1 * var(--s));
+  background: radial-gradient(circle at 100% 100%, transparent calc(var(--s) - 0.5px), #000 var(--s));
+}
+
+#island.m-hidden { --s: 5px; --r: 6px; opacity: 0.55; }
+#island.notch.m-hidden { --s: 0px; --r: 9px; opacity: 1; } /* sits exactly on the notch */
+#island.m-compact { --s: 10px; --r: 18px; }
+#island.m-open { --s: 14px; --r: 28px; }
+#island.m-incoming {
+  --s: 14px;
+  --r: 32px;
+  box-shadow: 0 12px 40px -8px var(--c);
+  animation: breathe 1.4s ease-in-out infinite;
+}
+
+@keyframes breathe { 50% { scale: 1.025; box-shadow: 0 14px 50px -4px var(--c); } }
+
+#content {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  translate: -50% 0;
+}
+#content.in { animation: reveal 0.38s 0.1s both; }
+@keyframes reveal { from { opacity: 0; filter: blur(6px); scale: 0.94; } }
+
+/* ---------- shared bits ---------- */
+
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--grey); }
+.dot.available { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.dot.busy { background: var(--red); box-shadow: 0 0 8px var(--red); }
+.dot.offline { background: var(--grey); }
+
+button {
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.12);
+  transition: background 0.15s ease, scale 0.15s ease;
+}
+button:hover { background: rgba(255, 255, 255, 0.2); }
+button:active { scale: 0.95; }
+button:disabled { opacity: 0.3; cursor: default; }
+button.ghost { background: transparent; color: var(--muted); padding: 4px 8px; }
+button.go { background: var(--green); color: #00230b; font-weight: 600; }
+button.no { background: var(--red); font-weight: 600; }
+button.x { width: 24px; height: 24px; padding: 0; display: grid; place-items: center; font-size: 12px; }
+
+.av {
+  --size: 22px;
+  position: relative;
+  width: var(--size);
+  height: var(--size);
+  border-radius: 50%;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: var(--c);
+  color: #fff;
+  font-weight: 700;
+  font-size: calc(var(--size) * 0.45);
+}
+.av.big { --size: 48px; }
+.av.ripple::before,
+.av.ripple::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--c);
+  animation: ripple 1.6s ease-out infinite;
+}
+.av.ripple::after { animation-delay: 0.8s; }
+@keyframes ripple { to { scale: 1.9; opacity: 0; } }
+
+.bars { display: flex; align-items: center; gap: 2px; height: 14px; }
+.bars i { width: 3px; height: 4px; border-radius: 2px; background: var(--c); animation: bar 0.9s ease-in-out infinite; }
+.bars i:nth-child(2) { animation-delay: 0.15s; }
+.bars i:nth-child(3) { animation-delay: 0.3s; }
+.bars i:nth-child(4) { animation-delay: 0.45s; }
+@keyframes bar { 50% { height: 14px; } }
+
+.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* ---------- compact live activity ---------- */
+
+/* Notch Macs: content lives in the two "wings" either side of the notch. */
+.wings { display: flex; align-items: center; height: var(--t); padding: 0 12px; }
+.wings .gap { flex: none; width: var(--nw); }
+.wing { flex: 1; display: flex; align-items: center; gap: 7px; min-width: 0; }
+.wing.right { justify-content: flex-end; }
+
+/* Everywhere else: a single row. */
+.row1 { display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 8px 0 9px; }
+.row1 .grow { flex: 1; }
+
+.icon { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; flex: none; }
+.icon.coming { background: var(--green); color: #00230b; }
+.icon.busy { background: var(--red); }
+.icon.missed { background: var(--grey); }
+
+/* ---------- open panel ---------- */
+
+.panel { padding: 10px 12px 10px; }
+.seg { display: flex; gap: 4px; padding: 3px; background: rgba(255, 255, 255, 0.08); border-radius: 999px; margin-bottom: 10px; }
+.seg button { flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px; background: transparent; }
+.seg button.on { background: rgba(255, 255, 255, 0.18); font-weight: 600; }
+
+.you { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; padding: 0 4px 8px; }
+.you input {
+  flex: 1;
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 8px;
+  outline: none;
+}
+
+.list { max-height: 300px; overflow-y: auto; }
+.row { display: flex; align-items: center; gap: 9px; padding: 6px 4px; border-radius: 12px; }
+.row:hover { background: rgba(255, 255, 255, 0.06); }
+.row .name { flex: 1; }
+.row .st { color: var(--muted); font-size: 11px; width: 56px; }
+.empty { color: var(--muted); padding: 12px 4px; text-align: center; font-size: 12px; }
+.foot { display: flex; justify-content: flex-end; padding-top: 4px; }
+
+/* ---------- incoming call ---------- */
+
+.incoming { padding: 16px 18px 18px; }
+.incoming .who { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+.incoming .title { font-size: 17px; font-weight: 600; }
+.incoming .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.incoming .actions { display: flex; gap: 8px; }
+.incoming .actions button { flex: 1; padding: 9px; font-size: 14px; }

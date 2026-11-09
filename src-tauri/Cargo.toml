@@ -1,0 +1,25 @@
+[package]
+name = "fliai-quick-call"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mdns-sd = "0.21.7"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tauri = { version = "2.12.5", features = ["macos-private-api"] }
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"

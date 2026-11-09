@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>FLiAI Quick Call</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
+    .frame {
+      position: fixed; inset: 0;
+      border: 14px solid var(--c);
+      box-shadow: inset 0 0 60px var(--c);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    .banner {
+      position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%);
+      background: var(--c); color: #fff;
+      font: 700 28px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      padding: 18px 32px; border-radius: 999px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+      white-space: nowrap;
+    }
+    @keyframes pulse { 50% { opacity: 0.55; } }
+  </style>
+</head>
+<body>
+  <div class="frame"></div>
+  <div class="banner" id="banner"></div>
+  <script>
+    const call = window.__CALL__ || { name: "Someone", color: "#3b82f6" };
+    document.documentElement.style.setProperty("--c", call.color);
+    document.getElementById("banner").textContent = `📣 ${call.name} is calling`;
+  </script>
+</body>
+</html>
