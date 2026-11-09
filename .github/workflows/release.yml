@@ -68,6 +68,45 @@ jobs:
           path: dist/${{ matrix.out }}
           retention-days: 1
 
+      # Microsoft Store package. Unsigned on purpose: Partner Center signs MSIX for free on upload.
+      # Needs repo variables MSIX_IDENTITY_NAME, MSIX_PUBLISHER, MSIX_PUBLISHER_DISPLAY_NAME
+      # (Partner Center > your app > Product management > Product identity).
+      - name: Build MSIX for the Microsoft Store
+        if: runner.os == 'Windows' && vars.MSIX_IDENTITY_NAME != ''
+        shell: pwsh
+        env:
+          IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = "msix-stage"
+          New-Item -ItemType Directory -Force "$stage/Assets" | Out-Null
+          Copy-Item src-tauri/target/release/fliai-quick-call.exe $stage/
+          foreach ($f in "StoreLogo.png", "Square44x44Logo.png", "Square150x150Logo.png") {
+            Copy-Item "src-tauri/icons/$f" "$stage/Assets/"
+          }
+          $version = "$($env:GITHUB_REF_NAME.TrimStart('v')).0"   # Store wants a.b.c.0
+          (Get-Content src-tauri/msix/AppxManifest.xml -Raw) `
+            -replace '{{IDENTITY_NAME}}', $env:IDENTITY_NAME `
+            -replace '{{PUBLISHER}}', $env:PUBLISHER `
+            -replace '{{PUBLISHER_DISPLAY_NAME}}', $env:PUBLISHER_DISPLAY_NAME `
+            -replace '{{VERSION}}', $version |
+            Set-Content "$stage/AppxManifest.xml" -Encoding utf8
+          $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          New-Item -ItemType Directory -Force msix | Out-Null
+          & $makeappx.FullName pack /d $stage /p "msix/fliai-quick-call-$version.msix" /o
+          if ($LASTEXITCODE -ne 0) { throw "makeappx failed" }
+
+      - name: Upload MSIX (download from the run, then submit in Partner Center)
+        if: runner.os == 'Windows' && vars.MSIX_IDENTITY_NAME != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: msix
+          path: msix/*.msix
+          retention-days: 30
+
   publish:
     needs: build
     runs-on: ubuntu-latest
@@ -86,6 +125,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          pattern: fliai-quick-call*   # not the Store MSIX
           merge-multiple: true
 
       - name: Prepare files

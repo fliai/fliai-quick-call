@@ -122,7 +122,12 @@ fn save_config(s: &State) {
     if let Some(dir) = s.config_path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&s.config_path, serde_json::to_string_pretty(&s.me).unwrap());
+    // Write to a temp file and rename over the original, so a crash or an overlapping launch
+    // never sees a half-written file (which would mint a new id and show up as a duplicate).
+    let tmp = s.config_path.with_extension("json.tmp");
+    if std::fs::write(&tmp, serde_json::to_string_pretty(&s.me).unwrap()).is_ok() {
+        let _ = std::fs::rename(&tmp, &s.config_path);
+    }
 }
 
 fn load_config(path: &PathBuf) -> Me {
@@ -197,6 +202,11 @@ fn upsert_peer(shared: &Shared, id: String, name: String, status: String, addr: 
         return;
     }
     let online = status != "offline";
+    // The same person may come back under a new id (reinstall, wiped config) or from the same
+    // address a previous instance used. Drop those stale entries so they don't show twice.
+    if online && !s.peers.contains_key(&id) {
+        s.peers.retain(|_, p| p.addr != addr && (p.online || !p.name.eq_ignore_ascii_case(&name)));
+    }
     let p = s.peers.entry(id).or_insert(Peer { name: String::new(), status: String::new(), addr, online, misses: 0 });
     p.name = name;
     p.addr = addr;
@@ -672,13 +682,31 @@ fn start_polling(app: AppHandle, shared: Shared) {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // One copy per user. The island is invisible until hovered, so people often launch the app
+    // again thinking it's closed; a second copy would advertise itself from another port.
+    // QUICKCALL_PROFILE is for running a second test copy on the same machine.
+    if std::env::var("QUICKCALL_PROFILE").is_err() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = app.emit("toast", json!({ "text": "Quick Call is already running" }));
+        }));
+    }
+    builder
+        .plugin(tauri_plugin_autostart::Builder::new().macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent).build())
         .invoke_handler(tauri::generate_handler![
             get_state, get_screen, set_status, set_name, call_peer, cancel_call, answer, resize, focus_island, quit
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory); // no Dock icon
+
+            // Start at login. Re-registered every launch so the path stays right after updates.
+            // The Microsoft Store (MSIX) build declares a startup task in its manifest instead.
+            #[cfg(not(debug_assertions))]
+            if !std::env::current_exe().is_ok_and(|p| p.to_string_lossy().to_lowercase().contains("\\windowsapps\\")) {
+                use tauri_plugin_autostart::ManagerExt;
+                let _ = app.autolaunch().enable();
+            }
 
             let file = match std::env::var("QUICKCALL_PROFILE") {
                 Ok(p) => format!("config-{p}.json"),
