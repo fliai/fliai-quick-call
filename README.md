@@ -24,6 +24,14 @@ Test two copies on one machine:
 QUICKCALL_PROFILE=test2 ./src-tauri/target/debug/fliai-quick-call
 ```
 
+## Release
+
+```sh
+npm run release -- patch   # or minor | major | 1.2.3
+```
+
+This bumps the version, commits, tags `vX.Y.Z` and pushes. GitHub Actions then builds a universal Mac `.dmg` and a Windows `-setup.exe` and publishes both under **Releases**.
+
 ## Notes
 
 - Everyone must be on the same network. Guest Wi-Fi with client isolation, or some VPNs, will block discovery.
