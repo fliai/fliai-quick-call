@@ -1,0 +1,68 @@
+name: Scripts
+
+# Publish the install / update / uninstall scripts to R2 when they change, without waiting for an
+# app release. (The release workflow also publishes them, together with the app.)
+on:
+  push:
+    branches: [main]
+    paths: ["install.sh", "install.ps1", "uninstall.sh", "uninstall.ps1", ".github/workflows/scripts.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release # never overlap with an app release writing to the same bucket
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      ENDPOINT: https://5cf45d4021da2e96449ecd54ca802dea.r2.cloudflarestorage.com
+      BUCKET: fliai-quick-call-downloads
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Upload scripts
+        run: |
+          mkdir dist
+          cp install.sh install.ps1 uninstall.sh uninstall.ps1 dist/
+          cp install.sh dist/update.sh
+          cp install.ps1 dist/update.ps1
+          for f in dist/*; do
+            aws s3 cp "$f" "s3://$BUCKET/$(basename "$f")" --endpoint-url "$ENDPOINT" \
+              --content-type "text/plain; charset=utf-8" --cache-control "no-cache"
+          done
+
+  # Run the real one-line commands: install, then uninstall, and check nothing is left behind.
+  verify-windows:
+    needs: publish
+    runs-on: windows-latest
+    steps:
+      - name: Install, then uninstall
+        shell: powershell
+        run: |
+          $name = "FLiAI Quick Call"
+          $out = & { irm https://cdn-quickcall.fliai.lk/install.ps1 | iex } *>&1 | Out-String
+          Write-Host $out
+          if ($out -match "Could not install") { exit 1 }
+          Start-Sleep -Seconds 5 # let the app start and register itself to start at sign-in
+
+          $out = & { irm https://cdn-quickcall.fliai.lk/uninstall.ps1 | iex } *>&1 | Out-String
+          Write-Host $out
+          if ($out -match "Could not uninstall") { exit 1 }
+
+          $left = @()
+          if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*\$name\*" }) { $left += "running process" }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA $name)) { $left += "app folder" }
+          if (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $name -ErrorAction SilentlyContinue) { $left += "start at sign-in" }
+          if (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq $name }) { $left += "Apps list entry" }
+          if (Test-Path (Join-Path $env:APPDATA "lk.fliai.quickcall")) { $left += "settings" }
+          if ($left) { Write-Host "Left behind: $($left -join ', ')"; exit 1 }
+          Write-Host "Clean uninstall."

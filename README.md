@@ -28,6 +28,24 @@ Installing from the terminal skips the macOS "unverified developer" and Windows 
 
 Mac builds are universal (Apple Silicon + Intel).
 
+The app starts by itself when you log in (Mac: a Launch Agent that also restarts it if it crashes or is force-quit; Windows: a sign-in entry). Quitting from the island keeps it closed until the next login.
+
+## Uninstall
+
+Mac (Terminal):
+
+```sh
+curl -fsSL https://cdn-quickcall.fliai.lk/uninstall.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://cdn-quickcall.fliai.lk/uninstall.ps1 | iex
+```
+
+Removes the app, its start-at-login entry and its settings. Microsoft Store installs: Start menu → right-click the app → **Uninstall**.
+
 ## Run / build
 
 Needs Rust (`rustup`) and Node.
