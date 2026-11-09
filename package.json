@@ -1,6 +1,6 @@
 {
   "name": "fliai-quick-call",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Tap a teammate on the shoulder over the office LAN",
   "scripts": {
     "tauri": "tauri",
