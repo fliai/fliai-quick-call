@@ -144,6 +144,9 @@ h1 .grad { background: linear-gradient(100deg, #0a84ff, #7c5cff 55%, #30d158); -
 .st.available { background: var(--green); } .st.busy { background: var(--red); } .st.offline { background: #636366; }
 .you { color: #98989f; padding: 10px 2px 6px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
 .you b { color: #fff; }
+.you { display: flex; align-items: center; justify-content: space-between; }
+.you .pen { color: #636366; margin-left: 4px; }
+.you .rf { width: 13px; height: 13px; fill: none; stroke: #98989f; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .row { display: flex; align-items: center; gap: 8px; padding: 8px 2px; }
 .row + .row { border-top: 1px solid rgba(255, 255, 255, 0.06); }
 .row .nm { flex: 1; font-weight: 500; }

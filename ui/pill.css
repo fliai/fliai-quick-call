@@ -6,7 +6,6 @@
   --red: #ff453a;
   --grey: #636366;
   --blue: #0a84ff;
-  --spring: cubic-bezier(0.3, 1.45, 0.5, 1);
 }
 
 /* Animatable custom properties: shoulder size and bottom corner radius. */
@@ -39,13 +38,9 @@ html, body {
   height: 6px;
   background: #000;
   border-radius: 0 0 var(--r) var(--r);
-  transition:
-    width 0.56s var(--spring),
-    height 0.56s var(--spring),
-    --r 0.45s ease,
-    --s 0.45s ease,
-    opacity 0.3s ease,
-    box-shadow 0.4s ease;
+  /* Size, corner and shoulder changes are animated from pill.js (see morph()): WebKit starts CSS
+     transitions with a stale clock after the page has been idle, so they jump to the end. */
+  transition: box-shadow 0.4s ease;
 }
 
 /* Concave "liquid" shoulders that melt the island into the screen edge. */
@@ -79,14 +74,25 @@ html, body {
 
 @keyframes breathe { 50% { scale: 1.025; box-shadow: 0 14px 50px -4px var(--c); } }
 
+/* The content lives inside the island's shape, so the growing shape reveals it (and the
+   shrinking shape swallows it) instead of text floating over a box that catches up. */
+#island .clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+}
 #content {
   position: absolute;
   top: 0;
   left: 50%;
   translate: -50% 0;
 }
-#content.in { animation: reveal 0.38s 0.1s both; }
-@keyframes reveal { from { opacity: 0; filter: blur(6px); scale: 0.94; } }
+/* Content arrives once the shape has mostly formed, and leaves before the shape shrinks. */
+#content.in { animation: reveal 0.5s 0.08s both; }
+#content.out { animation: conceal 0.3s ease-in both; pointer-events: none; }
+@keyframes reveal { from { opacity: 0; filter: blur(6px); scale: 0.96; } }
+@keyframes conceal { to { opacity: 0; filter: blur(4px); scale: 0.97; } }
 
 /* ---------- shared bits ---------- */
 
@@ -174,6 +180,9 @@ button.x { width: 24px; height: 24px; padding: 0; display: grid; place-items: ce
 .seg button.on { background: rgba(255, 255, 255, 0.18); font-weight: 600; }
 
 .you { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; padding: 0 4px 8px; }
+.you .refresh { margin-left: auto; display: grid; place-items: center; padding: 4px 6px; }
+.you .refresh.spin svg { animation: spin 0.6s linear 2; }
+@keyframes spin { to { rotate: 360deg; } }
 .you input {
   flex: 1;
   font: inherit;
