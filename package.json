@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Tap a teammate on the shoulder over the office LAN",
   "scripts": {
+    "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
     "release": "node scripts/release.mjs"
