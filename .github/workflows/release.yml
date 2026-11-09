@@ -130,7 +130,7 @@ jobs:
 
       - name: Prepare files
         run: |
-          cp install.sh install.ps1 dist/
+          cp install.sh install.ps1 uninstall.sh uninstall.ps1 dist/
           cp install.sh dist/update.sh
           cp install.ps1 dist/update.ps1
           printf '{"version":"%s"}\n' "${GITHUB_REF_NAME#v}" > dist/latest.json
@@ -141,7 +141,7 @@ jobs:
 
       - name: Upload (installers first, then metadata and scripts)
         run: |
-          for f in fliai-quick-call.dmg fliai-quick-call-setup.exe latest.json install.sh install.ps1 update.sh update.ps1; do
+          for f in fliai-quick-call.dmg fliai-quick-call-setup.exe latest.json install.sh install.ps1 update.sh update.ps1 uninstall.sh uninstall.ps1; do
             case "$f" in
               *.dmg)  type=application/x-apple-diskimage ;;
               *.exe)  type=application/vnd.microsoft.portable-executable ;;

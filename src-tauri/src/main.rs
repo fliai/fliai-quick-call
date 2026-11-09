@@ -771,6 +771,40 @@ fn poll_once(app: &AppHandle, shared: &Shared) {
     }
 }
 
+/// macOS: a Launch Agent that starts the app at login and restarts it if it crashes or is
+/// force-quit. Quitting from the island exits cleanly (status 0), so it then stays closed until
+/// the next login. Written only when it changes; takes effect from the next login.
+#[cfg(all(not(debug_assertions), target_os = "macos"))]
+fn register_login_item() {
+    let (Ok(exe), Some(home)) = (std::env::current_exe(), std::env::var_os("HOME")) else { return };
+    let dir = PathBuf::from(home).join("Library/LaunchAgents");
+    // Earlier versions registered through the autostart plugin under this name.
+    let _ = std::fs::remove_file(dir.join("FLiAI Quick Call.plist"));
+    let exe = exe.to_string_lossy().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>lk.fliai.quickcall</string>
+  <key>AssociatedBundleIdentifiers</key><array><string>lk.fliai.quickcall</string></array>
+  <key>ProgramArguments</key><array><string>{exe}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>
+"#
+    );
+    let path = dir.join("lk.fliai.quickcall.plist");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(plist.as_str()) {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&path, plist);
+    }
+}
+
 fn main() {
     let mut builder = tauri::Builder::default();
     // One copy per user. The island is invisible until hovered, so people often launch the app
@@ -781,8 +815,13 @@ fn main() {
             let _ = app.emit("toast", json!({ "text": "Quick Call is already running" }));
         }));
     }
+    // Start at sign-in on Windows (registry Run key). macOS uses our own Launch Agent instead,
+    // see register_login_item(), so it can also restart the app after a crash.
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.plugin(tauri_plugin_autostart::Builder::new().build());
+    }
     builder
-        .plugin(tauri_plugin_autostart::Builder::new().build()) // macOS: Launch Agent (the default)
         .invoke_handler(tauri::generate_handler![
             get_state, get_screen, set_status, set_name, call_peer, cancel_call, answer, resize, focus_island, refresh, quit
         ])
@@ -792,7 +831,9 @@ fn main() {
 
             // Start at login. Re-registered every launch so the path stays right after updates.
             // The Microsoft Store (MSIX) build declares a startup task in its manifest instead.
-            #[cfg(not(debug_assertions))]
+            #[cfg(all(not(debug_assertions), target_os = "macos"))]
+            register_login_item();
+            #[cfg(all(not(debug_assertions), not(target_os = "macos")))]
             if !std::env::current_exe().is_ok_and(|p| p.to_string_lossy().to_lowercase().contains("\\windowsapps\\")) {
                 use tauri_plugin_autostart::ManagerExt;
                 let _ = app.autolaunch().enable();
