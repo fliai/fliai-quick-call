@@ -6,31 +6,59 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
-    .frame {
-      position: fixed; inset: 0;
-      border: 14px solid var(--c);
-      box-shadow: inset 0 0 60px var(--c);
-      animation: pulse 1.2s ease-in-out infinite;
+
+    /* Thin edge drawn from the top center down both sides to the bottom center, then breathing. */
+    svg { position: fixed; inset: 0; width: 100%; height: 100%; overflow: visible; }
+    .edge {
+      fill: none; stroke: var(--c); stroke-width: 4; stroke-linejoin: round;
+      filter: drop-shadow(0 0 6px var(--c));
+      stroke-dasharray: var(--len); stroke-dashoffset: var(--len);
+      animation: draw 1.2s cubic-bezier(0.45, 0, 0.2, 1) forwards, breathe 2.4s ease-in-out 1.2s infinite;
     }
+    @keyframes draw { to { stroke-dashoffset: 0; } }
+    @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
     .banner {
-      position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%);
+      position: fixed; left: 50%; bottom: 32px; transform: translateX(-50%);
       background: var(--c); color: #fff;
-      font: 700 28px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-      padding: 18px 32px; border-radius: 999px;
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
-      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
-      white-space: nowrap;
+      font: 600 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      padding: 9px 16px; border-radius: 999px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
+      white-space: nowrap; opacity: 0.92;
     }
-    @keyframes pulse { 50% { opacity: 0.55; } }
+    /* "." -> ".." -> "..." with a fixed width so the text doesn't shift. */
+    .dots i { font-style: normal; }
+    .dots i:nth-child(2) { animation: dot2 1.2s steps(1, end) infinite; }
+    .dots i:nth-child(3) { animation: dot3 1.2s steps(1, end) infinite; }
+    @keyframes dot2 { 0% { opacity: 0; } 33.3% { opacity: 1; } }
+    @keyframes dot3 { 0% { opacity: 0; } 66.6% { opacity: 1; } }
+
+    @media (prefers-reduced-motion: reduce) {
+      .edge { animation: none; stroke-dashoffset: 0; opacity: 0.8; }
+      .dots i { animation: none !important; }
+    }
   </style>
 </head>
 <body>
-  <div class="frame"></div>
-  <div class="banner" id="banner"></div>
+  <svg aria-hidden="true"><path class="edge" id="left"/><path class="edge" id="right"/></svg>
+  <div class="banner"><span id="who"></span> is calling<span class="dots"><i>.</i><i>.</i><i>.</i></span></div>
   <script>
     const call = window.__CALL__ || { name: "Someone", color: "#3b82f6" };
     document.documentElement.style.setProperty("--c", call.color);
-    document.getElementById("banner").textContent = `📣 ${call.name} is calling`;
+    document.getElementById("who").textContent = call.name;
+
+    // Two strokes starting together at the top center, meeting at the bottom center.
+    function edges() {
+      const w = innerWidth, h = innerHeight, i = 2; // half the stroke, so it sits fully on screen
+      const left = document.getElementById("left"), right = document.getElementById("right");
+      left.setAttribute("d", `M ${w / 2} ${i} H ${i} V ${h - i} H ${w / 2}`);
+      right.setAttribute("d", `M ${w / 2} ${i} H ${w - i} V ${h - i} H ${w / 2}`);
+      const len = left.getTotalLength();
+      document.documentElement.style.setProperty("--len", len);
+    }
+    edges();
+    addEventListener("resize", edges);
   </script>
 </body>
 </html>

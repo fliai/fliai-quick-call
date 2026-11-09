@@ -5,8 +5,7 @@ const island = document.getElementById("island");
 const content = document.getElementById("content");
 const LABEL = { available: "Available", busy: "Busy", offline: "Offline" };
 const SHOULDER = 14;   // matches the largest --s in CSS
-const PAD = 20;        // room around the island for the glow
-const SPRING_MS = 560; // matches the width/height transition
+const OUT_MS = 520;    // the close transition; content stays in place while the shape swallows it
 
 let screen = { notch: false, notchWidth: 0, notchHeight: 0 };
 let state = { me: { name: "", status: "available" }, peers: [] };
@@ -17,8 +16,9 @@ let outgoing = null; // { name, status, color }
 let notice = null;   // { name, answer, color }
 let noticeTimer = null;
 let mode = null;
-let win = { w: 0, h: 0 };
-let shrinkTimer = null;
+let refreshing = false;
+let clearTimer = null;
+const REFRESH_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>`;
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const initial = (name) => esc((name || "?").trim().charAt(0).toUpperCase());
@@ -94,7 +94,8 @@ function openHtml() {
     : `<div class="empty">No one yet. Teammates appear here<br>when they run FLiAI Quick Call on the same Wi-Fi.</div>`;
   const you = editingName
     ? `<input id="name" maxlength="40" value="${esc(name)}">`
-    : `<span class="ellipsis">You: <b>${esc(name)}</b></span><button class="ghost" data-act="edit-name" title="Change name">✎</button>`;
+    : `<span class="ellipsis">You: <b>${esc(name)}</b></span><button class="ghost" data-act="edit-name" title="Change name">✎</button>
+       <button class="ghost refresh${refreshing ? " spin" : ""}" data-act="refresh" title="Find teammates again">${REFRESH_ICON}</button>`;
   return `
     <div class="panel">
       <div class="seg">
@@ -115,7 +116,8 @@ function render() {
   const isCompact = m === "outgoing" || m === "notice";
   const top = notch ? notchHeight : 0; // expanded content sits below the notch
 
-  island.className = `m-${m}${isCompact ? " m-compact" : ""}${notch ? " notch" : ""}`;
+  const from = shape(); // where the island is right now, mid-animation or not
+  island.className =`m-${m}${isCompact ? " m-compact" : ""}${notch ? " notch" : ""}`;
   const color = incoming?.color || outgoing?.color || notice?.color;
   if (color) island.style.setProperty("--c", color);
 
@@ -128,37 +130,101 @@ function render() {
     w = m === "incoming" ? 380 : 340;
   }
 
-  content.style.width = `${w}px`;
-  content.style.paddingTop = isCompact || m === "hidden" ? "0" : `${top}px`;
-  content.style.setProperty("--t", `${notchHeight}px`);
-  content.style.setProperty("--nw", `${notchWidth}px`);
-  content.innerHTML = { hidden: () => "", outgoing: outgoingHtml, notice: noticeHtml, incoming: incomingHtml, open: openHtml }[m]();
+  clearTimeout(clearTimer);
+  if (m === "hidden") {
+    // Leave the old content in place to blur out while the shape pulls back, then clear it.
+    if (mode && mode !== "hidden") {
+      content.classList.remove("in");
+      content.classList.add("out");
+    }
+    clearTimer = setTimeout(() => { if (currentMode() === "hidden") content.innerHTML = ""; }, OUT_MS);
+  } else {
+    content.classList.remove("out");
+    content.style.width = `${w}px`;
+    content.style.paddingTop = isCompact ? "0" : `${top}px`;
+    content.style.setProperty("--t", `${notchHeight}px`);
+    content.style.setProperty("--nw", `${notchWidth}px`);
+    content.innerHTML = { outgoing: outgoingHtml, notice: noticeHtml, incoming: incomingHtml, open: openHtml }[m]();
+  }
+  if (isCompact && notch) {
+    // Grow both wings (equally, so the gap stays over the notch) to fit the longer side.
+    const need = Math.max(...[...content.querySelectorAll(".wing")].map(naturalWidth));
+    w = notchWidth + 2 * WING_PAD + 2 * Math.min(Math.max(need, WING_MIN), WING_MAX);
+    content.style.width = `${w}px`;
+  }
   if (h === undefined) h = content.offsetHeight;
 
   if (m !== mode) {
-    content.classList.remove("in");
-    void content.offsetWidth; // restart the reveal animation
-    content.classList.add("in");
+    if (m !== "hidden") {
+      content.classList.remove("in");
+      void content.offsetWidth; // restart the reveal animation
+      content.classList.add("in");
+    }
     mode = m;
   }
 
   setIsland(w, h, m !== "hidden" && m !== "notice");
+  const target = `${island.className}|${w}|${h}`;
+  if (target !== lastTarget) {
+    lastTarget = target;
+    morph(from, m === "hidden");
+  }
   wireNameInput();
 }
 
-// Grow the window first, let the island spring inside it, then trim the window.
+// ---------- the liquid morph ----------
+// Opening stretches sideways, then drops down with a soft overshoot. Closing pulls up, then
+// narrows back into the notch or bar, without bounce. [duration, delay] in ms per property.
+// Corners are animated as plain border radii: WebKit stops width/height animations from applying
+// while custom properties (--r, --s) animate on the same element, which made the island jump.
+const RADIUS = ["border-bottom-left-radius", "border-bottom-right-radius"];
+const MOTION = {
+  open: { easing: "cubic-bezier(0.34, 1.4, 0.5, 1)", width: [620, 0], height: [660, 70], radius: [500, 50], opacity: [300, 0] },
+  close: { easing: "cubic-bezier(0.5, 0, 0.25, 1)", width: [420, 100], height: [360, 0], radius: [360, 0], opacity: [300, 200] },
+};
+const SHAPE_PROPS = ["width", "height", ...RADIUS, "opacity"];
+const camel = (p) => p.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+let morphs = [];
+let lastTarget = "";
+
+const shape = () => {
+  const cs = getComputedStyle(island);
+  return Object.fromEntries(SHAPE_PROPS.map((p) => [p, cs.getPropertyValue(p).trim()]));
+};
+
+// Animate from `from` to wherever the island's styles now say it should be. These are Web
+// Animations, which get their start time on the first frame they draw, so they never skip.
+function morph(from, closing) {
+  morphs.forEach((a) => a.cancel());
+  morphs = [];
+  const to = shape();
+  const m = closing ? MOTION.close : MOTION.open;
+  for (const p of SHAPE_PROPS) {
+    if (!from[p] || from[p] === to[p]) continue;
+    const [duration, delay] = m[RADIUS.includes(p) ? "radius" : p];
+    const k = camel(p);
+    morphs.push(island.animate([{ [k]: from[p] }, { [k]: to[p] }], { duration, delay, easing: m.easing, fill: "backwards" }));
+  }
+}
+
+const WING_PAD = 12;  // matches .wings horizontal padding
+const WING_MIN = 108; // the old fixed wing width
+const WING_MAX = 240; // past this, text ends with "…"
+
+// Width a wing's content wants, counting truncated text at its full length.
+function naturalWidth(wing) {
+  const kids = [...wing.children];
+  const gap = parseFloat(getComputedStyle(wing).columnGap) || 0;
+  return kids.reduce((sum, el) => sum + (el.classList.contains("ellipsis") ? el.scrollWidth : el.offsetWidth), 0)
+    + gap * Math.max(0, kids.length - 1) + 2; // +2 so text never rounds into an ellipsis
+}
+
+// The window is fixed and transparent; the island animates inside it. Tell the app the
+// island's final footprint (with its shoulders) so hover and clicks line up with it.
 function setIsland(w, h, interactive) {
-  const target = interactive ? { w: w + 2 * (SHOULDER + PAD), h: h + PAD } : { w: w + 2 * SHOULDER, h };
-  const grown = { w: Math.max(target.w, win.w), h: Math.max(target.h, win.h) };
-  clearTimeout(shrinkTimer);
-  invoke("resize", { width: grown.w, height: grown.h, interactive });
-  win = grown;
   island.style.width = `${w}px`;
   island.style.height = `${h}px`;
-  shrinkTimer = setTimeout(() => {
-    win = target;
-    invoke("resize", { width: target.w, height: target.h, interactive });
-  }, SPRING_MS);
+  invoke("resize", { width: w + 2 * SHOULDER, height: h, interactive });
 }
 
 function wireNameInput() {
@@ -199,6 +265,13 @@ document.body.addEventListener("click", (e) => {
     case "call": invoke("call_peer", { id }); break;
     case "cancel": invoke("cancel_call"); break;
     case "answer": invoke("answer", { answer: v }); break;
+    case "refresh":
+      if (refreshing) break;
+      refreshing = true;
+      render();
+      invoke("refresh");
+      setTimeout(() => { refreshing = false; render(); }, 1200); // matches the spin; results stream in via "state"
+      break;
     case "quit": invoke("quit"); break;
   }
 });

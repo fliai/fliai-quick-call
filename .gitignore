@@ -6,3 +6,6 @@ src-tauri/gen/
 *.tfstate
 *.tfstate.*
 *.tfplan
+
+# Store packages downloaded from CI
+*.msix

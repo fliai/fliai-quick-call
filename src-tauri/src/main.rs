@@ -19,6 +19,11 @@ const DEFAULT_PORT: u16 = 47800;
 const CALL_TIMEOUT_SECS: u64 = 30;
 const RING_EVERY_SECS: u64 = 5;
 const POLL_EVERY: Duration = Duration::from_secs(3);
+const REBROWSE_EVERY: Duration = Duration::from_secs(120);
+// How long the cursor must rest in (or stay away from) the top-center hot zone before the island
+// opens (or closes). Short, so it feels immediate; just enough to ignore a cursor passing by.
+const HOVER_OPEN_AFTER: Duration = Duration::from_millis(120);
+const HOVER_CLOSE_AFTER: Duration = Duration::from_millis(300);
 const NET_TIMEOUT: Duration = Duration::from_millis(1500);
 
 // ---------- state ----------
@@ -59,6 +64,7 @@ type Shared = Arc<Mutex<State>>;
 /// Where the island window currently sits, in logical pixels, plus its hover hot zone.
 #[derive(Default, Clone, Copy)]
 struct Geo {
+    // The island's visible rectangle (it sits inside a larger, fixed, transparent window).
     x: f64,
     y: f64,
     w: f64,
@@ -68,7 +74,17 @@ struct Geo {
     hot_x: f64,
     hot_w: f64,
     hot_h: f64,
+    // Where the window was last put, so we only move it when the screen layout changes.
+    win_x: f64,
+    win_y: f64,
+    placed: bool,
 }
+
+/// The island's window never changes size: resizing a webview mid-animation (or tucking a tiny
+/// window into the notch, where macOS treats it as hidden and pauses rendering) makes the
+/// island jump instead of flowing. Big enough for the largest island plus its glow.
+const WIN_W: f64 = 820.0;
+const WIN_H: f64 = 640.0;
 
 type SharedGeo = Arc<Mutex<Geo>>;
 
@@ -339,16 +355,23 @@ fn end_incoming(app: &AppHandle, shared: &Shared) {
     let _ = app.emit("incoming-end", ());
 }
 
+/// A soft two-note chime, built into the app so it sounds the same everywhere.
+static CHIME: &[u8] = include_bytes!("../sounds/chime.wav");
+
 fn play_sound() {
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("afplay").arg("/System/Library/Sounds/Glass.aiff").spawn();
+    {
+        let path = std::env::temp_dir().join("fliai-quickcall-chime.wav");
+        if std::fs::metadata(&path).map(|m| m.len()).ok() != Some(CHIME.len() as u64) {
+            let _ = std::fs::write(&path, CHIME);
+        }
+        let _ = std::process::Command::new("afplay").arg("-v").arg("0.5").arg(&path).spawn();
+    }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("rundll32")
-            .args(["user32.dll,MessageBeep"])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .spawn();
+        use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+        // SND_MEMORY plays straight from the bytes; they're static, so async playback is safe.
+        unsafe { PlaySoundW(CHIME.as_ptr() as *const u16, std::ptr::null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) };
     }
 }
 
@@ -445,21 +468,43 @@ fn place_island(app: &AppHandle, width: f64, height: f64, interactive: bool) {
         center += 460.0; // second test instance on the same machine
     }
     let top = pos.y as f64 / scale;
-    let x = center - width / 2.0;
-    let _ = pill.set_size(LogicalSize::new(width, height));
-    let _ = pill.set_position(LogicalPosition::new(x, top));
-    let _ = pill.set_ignore_cursor_events(!interactive);
+    let (win_x, win_y) = (center - WIN_W / 2.0, top);
+
+    let geo = app.state::<SharedGeo>();
+    let mut g = geo.lock().unwrap();
+    if !g.placed {
+        let _ = pill.set_size(LogicalSize::new(WIN_W, WIN_H));
+        let _ = pill.set_ignore_cursor_events(true); // the hover watcher enables clicks over the island
+    }
+    if !g.placed || g.win_x != win_x || g.win_y != win_y {
+        let _ = pill.set_position(LogicalPosition::new(win_x, win_y));
+    }
 
     let screen = *app.state::<Screen>();
     let (hot_w, hot_h) = if screen.notch { (screen.notch_width + 40.0, screen.notch_height) } else { (240.0, 6.0) };
-    *app.state::<SharedGeo>().lock().unwrap() =
-        Geo { x, y: top, w: width, h: height, interactive, scale, hot_x: center - hot_w / 2.0, hot_w, hot_h };
+    *g = Geo {
+        x: center - width / 2.0,
+        y: top,
+        w: width,
+        h: height,
+        interactive,
+        scale,
+        hot_x: center - hot_w / 2.0,
+        hot_w,
+        hot_h,
+        win_x,
+        win_y,
+        placed: true,
+    };
 }
 
 /// Tell the UI when the mouse reaches the top-center hot zone, or leaves the open island.
+/// Also makes the window clickable only while the cursor is over an interactive island, so the
+/// rest of the (transparent) window never blocks clicks to apps underneath.
 fn start_hover_watch(app: AppHandle, geo: SharedGeo) {
     thread::spawn(move || {
         let (mut inside, mut raw_was, mut since) = (false, false, Instant::now());
+        let mut clickable = false;
         loop {
             thread::sleep(Duration::from_millis(60));
             let Ok(p) = app.cursor_position() else { continue };
@@ -470,12 +515,19 @@ fn start_hover_watch(app: AppHandle, geo: SharedGeo) {
             let (x, y) = (p.x / g.scale, p.y / g.scale);
             let in_hot = x >= g.hot_x && x <= g.hot_x + g.hot_w && y >= g.y - 2.0 && y <= g.y + g.hot_h;
             let in_island = g.interactive && x >= g.x - 16.0 && x <= g.x + g.w + 16.0 && y >= g.y - 2.0 && y <= g.y + g.h + 16.0;
+            let over_island = g.interactive && x >= g.x && x <= g.x + g.w && y >= g.y - 2.0 && y <= g.y + g.h;
+            if over_island != clickable {
+                clickable = over_island;
+                if let Some(pill) = app.get_webview_window("pill") {
+                    let _ = pill.set_ignore_cursor_events(!clickable);
+                }
+            }
             let raw = in_hot || (inside && in_island);
             if raw != raw_was {
                 raw_was = raw;
                 since = Instant::now();
             }
-            let dwell = Duration::from_millis(if raw { 120 } else { 450 });
+            let dwell = if raw { HOVER_OPEN_AFTER } else { HOVER_CLOSE_AFTER };
             if raw != inside && since.elapsed() >= dwell {
                 inside = raw;
                 let _ = app.emit("hover", inside);
@@ -576,7 +628,8 @@ fn answer(app: AppHandle, shared: tauri::State<Shared>, answer: String) {
 
 #[tauri::command]
 fn resize(app: AppHandle, width: f64, height: f64, interactive: bool) {
-    place_island(&app, width.clamp(40.0, 800.0), height.clamp(4.0, 700.0), interactive);
+    // Reports the island's size (for hover and clicks); the window itself stays fixed.
+    place_island(&app, width.clamp(40.0, WIN_W), height.clamp(4.0, WIN_H), interactive);
 }
 
 #[tauri::command]
@@ -597,23 +650,53 @@ fn quit(app: AppHandle, shared: tauri::State<Shared>) {
     app.exit(0);
 }
 
+#[tauri::command]
+fn refresh(app: AppHandle, shared: tauri::State<Shared>) {
+    let shared = shared.inner().clone();
+    thread::spawn(move || {
+        browse(&app, &shared);
+        poll_once(&app, &shared);
+    });
+}
+
 // ---------- discovery ----------
 
+/// The mDNS daemon, kept so discovery can be restarted.
+struct Discovery(Option<ServiceDaemon>);
+
 fn start_discovery(app: AppHandle, shared: Shared) {
-    let Ok(mdns) = ServiceDaemon::new() else { return };
-    let (my_id, port) = {
-        let s = shared.lock().unwrap();
-        (s.me.id.clone(), s.port)
-    };
-    let short: String = my_id.chars().rev().take(12).collect();
-    let props = [("id", my_id.as_str())];
-    if let Ok(info) = ServiceInfo::new(SERVICE_TYPE, &format!("quickcall-{short}"), &format!("quickcall-{short}.local."), "", port, &props[..]) {
-        let _ = mdns.register(info.enable_addr_auto());
+    let mdns = ServiceDaemon::new().ok();
+    if let Some(mdns) = &mdns {
+        let (my_id, port) = {
+            let s = shared.lock().unwrap();
+            (s.me.id.clone(), s.port)
+        };
+        let short: String = my_id.chars().rev().take(12).collect();
+        let props = [("id", my_id.as_str())];
+        if let Ok(info) = ServiceInfo::new(SERVICE_TYPE, &format!("quickcall-{short}"), &format!("quickcall-{short}.local."), "", port, &props[..]) {
+            let _ = mdns.register(info.enable_addr_auto());
+        }
     }
+    app.manage(Discovery(mdns));
+    browse(&app, &shared);
+
+    // mDNS backs off its queries up to once an hour, so someone whose announcement was lost
+    // could stay invisible for ages. Restarting the browse resets that to 1, 2, 4... seconds.
+    thread::spawn(move || loop {
+        thread::sleep(REBROWSE_EVERY);
+        browse(&app, &shared);
+    });
+}
+
+/// (Re)start browsing: query the network right away and handle whoever answers.
+/// A new browse replaces the old one, whose loop then ends.
+fn browse(app: &AppHandle, shared: &Shared) {
+    let Some(mdns) = app.state::<Discovery>().0.clone() else { return };
     let Ok(rx) = mdns.browse(SERVICE_TYPE) else { return };
+    let my_id = shared.lock().unwrap().me.id.clone();
+    let (app, shared) = (app.clone(), shared.clone());
 
     thread::spawn(move || {
-        let _keep_alive = mdns;
         while let Ok(ev) = rx.recv() {
             let ServiceEvent::ServiceResolved(svc) = ev else { continue };
             let Some(id) = svc.get_property_val_str("id").map(str::to_string) else { continue };
@@ -643,6 +726,13 @@ fn start_discovery(app: AppHandle, shared: Shared) {
 fn start_polling(app: AppHandle, shared: Shared) {
     thread::spawn(move || loop {
         thread::sleep(POLL_EVERY);
+        poll_once(&app, &shared);
+    });
+}
+
+/// Ask every known peer for its name and status; mark them offline after two misses.
+fn poll_once(app: &AppHandle, shared: &Shared) {
+    {
         let targets: Vec<(String, SocketAddr)> = shared.lock().unwrap().peers.iter().map(|(id, p)| (id.clone(), p.addr)).collect();
         let results: Vec<(String, Option<Value>)> = thread::scope(|sc| {
             let handles: Vec<_> = targets.into_iter().map(|(id, a)| sc.spawn(move || (id, send(a, &Msg::Info).ok()))).collect();
@@ -676,9 +766,9 @@ fn start_polling(app: AppHandle, shared: Shared) {
             }
         }
         if changed {
-            push_state(&app, &shared);
+            push_state(app, shared);
         }
-    });
+    }
 }
 
 fn main() {
@@ -694,7 +784,7 @@ fn main() {
     builder
         .plugin(tauri_plugin_autostart::Builder::new().build()) // macOS: Launch Agent (the default)
         .invoke_handler(tauri::generate_handler![
-            get_state, get_screen, set_status, set_name, call_peer, cancel_call, answer, resize, focus_island, quit
+            get_state, get_screen, set_status, set_name, call_peer, cancel_call, answer, resize, focus_island, refresh, quit
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
