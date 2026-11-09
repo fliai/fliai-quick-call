@@ -1,12 +1,16 @@
 name: Release
 
-# Push a tag like v0.2.0 (use `npm run release -- patch`) to build and publish.
+# Push a tag like v0.2.0 (use `npm run release -- patch`) to build and publish to R2.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -17,9 +21,13 @@ jobs:
           - os: macos-latest
             args: --target universal-apple-darwin --bundles app,dmg
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            file: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            out: fliai-quick-call.dmg
           - os: windows-latest
             args: --bundles nsis
             rust_targets: ""
+            file: src-tauri/target/release/bundle/nsis/*-setup.exe
+            out: fliai-quick-call-setup.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -48,18 +56,68 @@ jobs:
 
       - run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: FLiAI Quick Call ${{ github.ref_name }}
-          releaseBody: |
-            **Mac** (Intel + Apple Silicon): download the `.dmg`, drag the app to Applications.
-            First open: System Settings → Privacy & Security → Open Anyway.
+      - run: npx tauri build ${{ matrix.args }}
 
-            **Windows**: download the `-setup.exe` and run it.
-            If "Windows protected your PC" appears: More info → Run anyway. Allow it on Private networks.
-          releaseDraft: false
-          prerelease: false
-          args: ${{ matrix.args }}
+      - name: Give the installer a fixed name
+        shell: bash
+        run: mkdir dist && cp ${{ matrix.file }} "dist/${{ matrix.out }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.out }}
+          path: dist/${{ matrix.out }}
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      ENDPOINT: https://5cf45d4021da2e96449ecd54ca802dea.r2.cloudflarestorage.com
+      BUCKET: fliai-quick-call-downloads
+      MAX_BYTES: "52428800" # 50 MB for everything in the bucket
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Prepare files
+        run: |
+          cp install.sh install.ps1 dist/
+          printf '{"version":"%s"}\n' "${GITHUB_REF_NAME#v}" > dist/latest.json
+          ls -l dist
+          total=$(du -cb dist/* | tail -1 | cut -f1)
+          echo "Total: $total bytes"
+          if [ "$total" -gt "$MAX_BYTES" ]; then echo "Over the 50 MB budget"; exit 1; fi
+
+      - name: Upload (installers first, then metadata and scripts)
+        run: |
+          for f in fliai-quick-call.dmg fliai-quick-call-setup.exe latest.json install.sh install.ps1; do
+            case "$f" in
+              *.dmg)  type=application/x-apple-diskimage ;;
+              *.exe)  type=application/vnd.microsoft.portable-executable ;;
+              *.json) type=application/json ;;
+              *)      type="text/plain; charset=utf-8" ;;
+            esac
+            aws s3 cp "dist/$f" "s3://$BUCKET/$f" --endpoint-url "$ENDPOINT" \
+              --content-type "$type" --cache-control "no-cache"
+          done
+
+      - name: Keep only the current release
+        run: |
+          aws s3 ls "s3://$BUCKET/" --recursive --endpoint-url "$ENDPOINT" | awk '{print $4}' > keys.txt
+          ls dist > keep.txt
+          grep -vxF -f keep.txt keys.txt | while read -r key; do
+            echo "Removing old file: $key"
+            aws s3 rm "s3://$BUCKET/$key" --endpoint-url "$ENDPOINT"
+          done
+          total=$(aws s3 ls "s3://$BUCKET/" --recursive --summarize --endpoint-url "$ENDPOINT" | awk '/Total Size/ {print $3}')
+          echo "Bucket now holds $total bytes"
+          if [ "$total" -gt "$MAX_BYTES" ]; then echo "Bucket is over the 50 MB budget"; exit 1; fi
