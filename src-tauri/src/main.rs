@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -351,7 +352,7 @@ fn answer_incoming(app: &AppHandle, shared: &Shared, answer: &str) {
 
 fn end_incoming(app: &AppHandle, shared: &Shared) {
     shared.lock().unwrap().incoming = None;
-    hide_overlays(app);
+    hide_overlays_soon(app); // the "incoming-end" event below makes the border retract first
     let _ = app.emit("incoming-end", ());
 }
 
@@ -377,13 +378,19 @@ fn play_sound() {
 
 // ---------- windows ----------
 
+/// Each call's overlay windows get their own generation in their label, so closing one call's
+/// overlays after its exit animation never removes a newer call's.
+static OVERLAY_GEN: AtomicU64 = AtomicU64::new(0);
+const OVERLAY_EXIT: Duration = Duration::from_millis(800); // a little over overlay.html's retract
+
 fn show_overlays(app: &AppHandle, name: &str, color: &str) {
+    let generation = OVERLAY_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let Ok(monitors) = app.available_monitors() else { return };
     let data = json!({ "name": name, "color": color });
     for (i, m) in monitors.iter().enumerate() {
         let scale = m.scale_factor();
         let (pos, size) = (m.position(), m.size());
-        let built = WebviewWindowBuilder::new(app, format!("overlay-{i}"), WebviewUrl::App("overlay.html".into()))
+        let built = WebviewWindowBuilder::new(app, format!("overlay-{generation}-{i}"), WebviewUrl::App("overlay.html".into()))
             .initialization_script(format!("window.__CALL__ = {data};"))
             .position(pos.x as f64 / scale, pos.y as f64 / scale)
             .inner_size(size.width as f64 / scale, size.height as f64 / scale)
@@ -449,6 +456,21 @@ fn detect_notch() -> Screen {
     Screen::default()
 }
 
+/// Close the current call's overlays once their border has retracted.
+fn hide_overlays_soon(app: &AppHandle) {
+    let prefix = format!("overlay-{}-", OVERLAY_GEN.load(Ordering::SeqCst));
+    let app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(OVERLAY_EXIT);
+        for (label, w) in app.webview_windows() {
+            if label.starts_with(&prefix) {
+                let _ = w.destroy();
+            }
+        }
+    });
+}
+
+/// Close every overlay right away (a new call replaces the old one).
 fn hide_overlays(app: &AppHandle) {
     for (label, w) in app.webview_windows() {
         if label.starts_with("overlay-") {
@@ -656,7 +678,50 @@ fn refresh(app: AppHandle, shared: tauri::State<Shared>) {
     thread::spawn(move || {
         browse(&app, &shared);
         poll_once(&app, &shared);
+        check_update(&app);
     });
+}
+
+// ---------- update check ----------
+
+const LATEST_URL: &str = "https://cdn-quickcall.fliai.lk/latest.json";
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Look for a newer version shortly after launch (once the network is up), then every few hours.
+fn start_update_checks(app: AppHandle) {
+    // The Microsoft Store version updates itself through the Store.
+    if std::env::current_exe().is_ok_and(|p| p.to_string_lossy().to_lowercase().contains("\\windowsapps\\")) {
+        return;
+    }
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(10));
+        loop {
+            check_update(&app);
+            thread::sleep(UPDATE_CHECK_EVERY);
+        }
+    });
+}
+
+/// Fetch latest.json with the system's curl (built into macOS and Windows 10/11, so no HTTP
+/// library is needed; the CDN doesn't allow the web view to fetch it directly). Tells the UI
+/// the latest version if it's newer than this one.
+fn check_update(app: &AppHandle) {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-fsSL", "--max-time", "10", LATEST_URL]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let Ok(out) = cmd.output() else { return };
+    let Some(latest) = serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| v["version"].as_str().map(str::to_string)) else {
+        return;
+    };
+    let parse = |v: &str| v.split('.').map(|n| n.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let current = app.package_info().version.to_string();
+    if parse(&latest) > parse(&current) {
+        let _ = app.emit("update", json!({ "latest": clean(&latest, 20) }));
+    }
 }
 
 // ---------- discovery ----------
@@ -872,6 +937,7 @@ fn main() {
                 raise(&pill, ISLAND_LEVEL);
                 let _ = pill.show();
             }
+            start_update_checks(handle.clone());
             start_hover_watch(handle, geo);
             Ok(())
         })

@@ -5,7 +5,7 @@ Tap a teammate on the shoulder when they're wearing headphones. You click their 
 - It lives in a Dynamic Island at the top center of the screen. On MacBooks with a notch it hides inside the notch. Everywhere else it's a "liquid" island that melts out of the top edge. Move the mouse to the top center to open it.
 - Each person sets their own status: 🟢 Available / 🔴 Busy. ⚪ Offline is automatic.
 - Busy means do not disturb. You can't call a Busy person, and if a call arrives anyway they see nothing and the caller gets "Busy".
-- Replies are **Coming** or **Busy**. An unanswered call times out after 30 s.
+- Replies are **Accept** or **Busy**. An unanswered call times out after 30 s.
 - No server. Peers find each other with mDNS (Bonjour) on the office network and talk directly over TCP (port 47800).
 
 ## Install / update

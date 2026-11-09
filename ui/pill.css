@@ -31,8 +31,11 @@ html, body {
   --c: var(--blue);
   position: absolute;
   top: 0;
-  left: 50%;
-  translate: -50% 0;
+  /* Centered with auto margins, not translate(-50%): WebKit freezes the translate when an
+     animation starts while the island is resizing, which pushed the incoming-call island off-center. */
+  left: 0;
+  right: 0;
+  margin-inline: auto;
   transform-origin: 50% 0;
   width: 110px;
   height: 6px;
@@ -40,7 +43,6 @@ html, body {
   border-radius: 0 0 var(--r) var(--r);
   /* Size, corner and shoulder changes are animated from pill.js (see morph()): WebKit starts CSS
      transitions with a stale clock after the page has been idle, so they jump to the end. */
-  transition: box-shadow 0.4s ease;
 }
 
 /* Concave "liquid" shoulders that melt the island into the screen edge. */
@@ -68,11 +70,7 @@ html, body {
 #island.m-incoming {
   --s: 14px;
   --r: 32px;
-  box-shadow: 0 12px 40px -8px var(--c);
-  animation: breathe 1.4s ease-in-out infinite;
 }
-
-@keyframes breathe { 50% { scale: 1.025; box-shadow: 0 14px 50px -4px var(--c); } }
 
 /* The content lives inside the island's shape, so the growing shape reveals it (and the
    shrinking shape swallows it) instead of text floating over a box that catches up. */
@@ -86,7 +84,7 @@ html, body {
   position: absolute;
   top: 0;
   left: 50%;
-  translate: -50% 0;
+  margin-left: calc(var(--cw, 0px) / -2); /* centered without translate, see #island */
 }
 /* Content arrives once the shape has mostly formed, and leaves before the shape shrinks. */
 #content.in { animation: reveal 0.5s 0.08s both; }
@@ -200,7 +198,11 @@ button.x { width: 24px; height: 24px; padding: 0; display: grid; place-items: ce
 .row .name { flex: 1; }
 .row .st { color: var(--muted); font-size: 11px; width: 56px; }
 .empty { color: var(--muted); padding: 12px 4px; text-align: center; font-size: 12px; }
-.foot { display: flex; justify-content: flex-end; padding-top: 4px; }
+.foot { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding-top: 4px; }
+.foot .ver { color: var(--grey); font-size: 11px; font-variant-numeric: tabular-nums; }
+.foot .upd { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; color: var(--green); }
+.foot .upd i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.foot button { justify-self: end; }
 
 /* ---------- incoming call ---------- */
 

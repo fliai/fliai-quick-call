@@ -17,6 +17,8 @@ let notice = null;   // { name, answer, color }
 let noticeTimer = null;
 let mode = null;
 let refreshing = false;
+let version = "";
+let latest = ""; // set when a newer version is out
 let clearTimer = null;
 const REFRESH_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>`;
 
@@ -53,14 +55,14 @@ function outgoingHtml() {
 function noticeHtml() {
   const { name, answer } = notice;
   const icon = { coming: "✓", busy: "✕", missed: "–" }[answer] || "•";
-  const text = { coming: "Coming", busy: "Busy", missed: "No answer" }[answer] || answer;
+  const text = { coming: "Accepted", busy: "Busy", missed: "No answer" }[answer] || answer;
   if (screen.notch) {
     return compact(
       `<span class="icon ${esc(answer)}">${icon}</span><span class="ellipsis">${esc(name)}</span>`,
       `<span>${esc(text)}</span>`
     );
   }
-  const long = { coming: `${name} is coming`, busy: `${name} is busy right now`, missed: `${name} didn't answer` }[answer] || `${name}: ${answer}`;
+  const long = { coming: `${name} accepted`, busy: `${name} is busy right now`, missed: `${name} didn't answer` }[answer] || `${name}: ${answer}`;
   return compact(`<span class="icon ${esc(answer)}">${icon}</span><span class="ellipsis">${esc(long)}</span>`, "");
 }
 
@@ -75,7 +77,7 @@ function incomingHtml() {
         </div>
       </div>
       <div class="actions">
-        <button class="go" data-act="answer" data-v="coming">Coming</button>
+        <button class="go" data-act="answer" data-v="coming">Accept</button>
         <button class="no" data-act="answer" data-v="busy">Busy</button>
       </div>
     </div>`;
@@ -104,7 +106,7 @@ function openHtml() {
       </div>
       <div class="you">${you}</div>
       <div class="list">${rows}</div>
-      <div class="foot"><button class="ghost" data-act="quit">Quit</button></div>
+      <div class="foot"><span></span><span class="ver">${version ? `v${esc(version)}` : ""}${latest ? `<span class="upd" title="Update available: run the update command"><i></i>v${esc(latest)}</span>` : ""}</span><button class="ghost" data-act="quit">Quit</button></div>
     </div>`;
 }
 
@@ -140,7 +142,7 @@ function render() {
     clearTimer = setTimeout(() => { if (currentMode() === "hidden") content.innerHTML = ""; }, OUT_MS);
   } else {
     content.classList.remove("out");
-    content.style.width = `${w}px`;
+    setContentWidth(w);
     content.style.paddingTop = isCompact ? "0" : `${top}px`;
     content.style.setProperty("--t", `${notchHeight}px`);
     content.style.setProperty("--nw", `${notchWidth}px`);
@@ -150,7 +152,7 @@ function render() {
     // Grow both wings (equally, so the gap stays over the notch) to fit the longer side.
     const need = Math.max(...[...content.querySelectorAll(".wing")].map(naturalWidth));
     w = notchWidth + 2 * WING_PAD + 2 * Math.min(Math.max(need, WING_MIN), WING_MAX);
-    content.style.width = `${w}px`;
+    setContentWidth(w);
   }
   if (h === undefined) h = content.offsetHeight;
 
@@ -164,7 +166,7 @@ function render() {
   }
 
   setIsland(w, h, m !== "hidden" && m !== "notice");
-  const target = `${island.className}|${w}|${h}`;
+  const target =`${island.className}|${w}|${h}`;
   if (target !== lastTarget) {
     lastTarget = target;
     morph(from, m === "hidden");
@@ -217,6 +219,12 @@ function naturalWidth(wing) {
   const gap = parseFloat(getComputedStyle(wing).columnGap) || 0;
   return kids.reduce((sum, el) => sum + (el.classList.contains("ellipsis") ? el.scrollWidth : el.offsetWidth), 0)
     + gap * Math.max(0, kids.length - 1) + 2; // +2 so text never rounds into an ellipsis
+}
+
+// The content keeps its final width while the shape grows around it; --cw centers it.
+function setContentWidth(w) {
+  content.style.width = `${w}px`;
+  content.style.setProperty("--cw", `${w}px`);
 }
 
 // The window is fixed and transparent; the island animates inside it. Tell the app the
@@ -276,6 +284,7 @@ document.body.addEventListener("click", (e) => {
   }
 });
 
+listen("update", (e) => { latest = e.payload.latest; render(); });
 listen("hover", (e) => { hovering = e.payload; render(); });
 listen("state", (e) => { state = e.payload; render(); });
 listen("incoming", (e) => { incoming = e.payload; render(); });
@@ -284,6 +293,8 @@ listen("outgoing", (e) => { outgoing = e.payload; render(); });
 listen("outgoing-end", () => { outgoing = null; render(); });
 listen("reply", (e) => { outgoing = null; showNotice(e.payload); });
 listen("toast", (e) => { outgoing = null; showNotice({ name: e.payload.text, answer: "missed", color: "" }); });
+
+window.__TAURI__.app?.getVersion().then((v) => { version = v; render(); }).catch(() => {});
 
 Promise.all([invoke("get_screen"), invoke("get_state")]).then(([sc, st]) => {
   screen = sc;
