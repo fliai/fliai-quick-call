@@ -692,7 +692,7 @@ fn main() {
         }));
     }
     builder
-        .plugin(tauri_plugin_autostart::Builder::new().macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent).build())
+        .plugin(tauri_plugin_autostart::Builder::new().build()) // macOS: Launch Agent (the default)
         .invoke_handler(tauri::generate_handler![
             get_state, get_screen, set_status, set_name, call_peer, cancel_call, answer, resize, focus_island, quit
         ])
