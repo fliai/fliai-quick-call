@@ -17,6 +17,7 @@ let notice = null;   // { name, answer, color }
 let act = null;      // the latest activity event, shown briefly
 let actTimer = null;
 let tab = "people";  // open island: "people" | "updates"
+let openRow = "";   // the update whose details are showing (one at a time)
 let unread = 0;      // updates that arrived while the Updates tab wasn't showing
 let noticeTimer = null;
 let mode = null;
@@ -74,30 +75,67 @@ function noticeHtml() {
 
 // ---------- deployment / GitHub activity ----------
 
-const ACT_ICON = { started: "", success: "✓", failure: "✕", cancelled: "–", opened: "•", merged: "✓", closed: "–" };
+const ACT_ICON = { started: "", success: "✓", failure: "✕", cancelled: "–", unknown: "?", opened: "•", merged: "✓", closed: "–" };
 const repoShort = (r) => String(r).replace(/^snap-/, "");
+const ENV_SHORT = { production: "prod" };
 
-// Short text for the compact island and the activity list.
+// A deploy that started but whose result never arrived (the relay laptop went offline mid-deploy),
+// or that ended in a way we can't name. It says "not available": never a guess, never a spinner forever.
+const DEPLOY_RESULT_WAIT = 30 * 60; // seconds
+const ROW_LIFE = 12 * 60 * 60; // seconds; rows from a previous day leave the list
+const noResult = (ev) => ev.kind === "deploy" && (ev.state === "unknown" || (ev.state === "started" && Date.now() / 1000 - ev.at > DEPLOY_RESULT_WAIT));
+
+// The three parts of an update: what it is, its status (never cut short), and extra detail
+// (who wrote it, the title) that gives way with "…" when space is tight.
 function actText(ev) {
+  const who = ev.actor || "";
   if (ev.kind === "deploy") {
-    const what = { started: "deploying…", success: "deployed", failure: "deploy failed", cancelled: "deploy cancelled" }[ev.state];
-    return { head: `${repoShort(ev.repo)} → ${ev.env || "?"}`, tail: what };
+    const status = noResult(ev)
+      ? "not available"
+      : { started: "deploying…", success: "deployed", failure: "failed", cancelled: "cancelled" }[ev.state];
+    return { head: `${repoShort(ev.repo)} → ${ENV_SHORT[ev.env] || ev.env || "?"}`, status, extra: who };
   }
   const label = ev.kind === "pr" ? "PR" : "Issue";
-  return { head: `${repoShort(ev.repo)} ${label} #${ev.number} ${ev.state}`, tail: ev.title };
+  return { head: `${repoShort(ev.repo)} ${label} #${ev.number}`, status: ev.state, extra: [who, ev.title].filter(Boolean).join(" · ") };
 }
 
 function actIcon(ev) {
+  if (noResult(ev)) return `<span class="icon act unknown">?</span>`;
   const cls = ev.kind === "deploy" ? ev.state : `${ev.kind}-${ev.state}`;
   return `<span class="icon act ${esc(cls)}">${ACT_ICON[ev.state] ?? "•"}</span>`;
 }
 
 function activityHtml() {
-  const { head, tail } = actText(act);
+  const { head, status, extra } = actText(act);
+  const more = extra ? `<span class="ellipsis">${esc(extra)}</span>` : "";
   if (screen.notch) {
-    return compact(`${actIcon(act)}<span class="ellipsis">${esc(head)}</span>`, `<span class="ellipsis">${esc(tail)}</span>`);
+    // Left of the notch: what it is. Right: its status first, so only the detail can be cut.
+    return act.kind === "deploy"
+      ? compact(`${actIcon(act)}<span class="keep">${esc(head)}</span>`, `<span class="keep">${esc(status)}</span>${more}`)
+      : compact(`${actIcon(act)}<span class="keep">${esc(head)} ${esc(status)}</span>`, more);
   }
-  return compact(`${actIcon(act)}<span class="ellipsis"><b>${esc(head)}</b> ${esc(tail)}</span>`, "");
+  return compact(`${actIcon(act)}<span class="keep"><b>${esc(head)}</b> ${esc(status)}</span>${more}`, "");
+}
+
+// A row keeps its key through its lifecycle (the id without its state), so it stays open as it changes.
+const rowKey = (ev) => String(ev.id).replace(/:[^:]*$/, "");
+
+// Everything about one update, uncut. Shown under its row when clicked.
+function detailHtml(ev) {
+  const line = (k, v) => `<div class="k">${k}</div><div class="v">${esc(v)}</div>`;
+  const time = new Date(ev.at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const { status } = actText(ev);
+  const what = ev.kind === "deploy" ? `Deploy to ${ev.env || "?"}` : ev.kind === "pr" ? `Pull request #${ev.number}` : `Issue #${ev.number}`;
+  return `<div class="act-detail">
+    ${ev.title ? `<div class="t">${esc(ev.title)}</div>` : ""}
+    <div class="kv">
+      ${line("What", what)}
+      ${line("Repo", ev.repo)}
+      ${line("Status", !noResult(ev) ? status : ev.state === "unknown" ? "not available (ended without a clear result)" : "not available (no result received)")}
+      ${line(ev.kind === "deploy" ? "Changes by" : "Opened by", ev.actor || "not available")}
+      ${line("Time", time)}
+    </div>
+  </div>`;
 }
 
 function ago(at) {
@@ -163,11 +201,14 @@ function openHtml() {
         </div>`).join("")
     : `<div class="empty">No one yet. Teammates appear here<br>when they run FLiAI Quick Call on the same Wi-Fi.</div>`;
 
-  const items = (state.activity || []);
+  const items = (state.activity || []).filter((ev) => Date.now() / 1000 - ev.at <= ROW_LIFE);
   const updates = items.length
     ? items.map((ev) => {
-        const { head, tail } = actText(ev);
-        return `<div class="act-row">${actIcon(ev)}<span class="ellipsis"><b>${esc(head)}</b> ${esc(tail || "")}</span><span class="when">${ago(ev.at)}</span></div>`;
+        const { head, status, extra } = actText(ev);
+        const key = rowKey(ev);
+        const on = key === openRow;
+        const row = `<button class="act-row${on ? " on" : ""}" data-act="detail" data-id="${esc(key)}" aria-expanded="${on}">${actIcon(ev)}<span class="keep"><b>${esc(head)}</b> ${esc(status)}</span><span class="ellipsis">${on ? "" : esc(extra)}</span><span class="when">${ago(ev.at)}</span></button>`;
+        return on ? row + detailHtml(ev) : row;
       }).join("")
     : `<div class="empty">No updates yet. Deployments, pull requests<br>and issues show here as they happen.</div>`;
 
@@ -236,9 +277,25 @@ function render() {
     content.style.setProperty("--nw", `${notchWidth}px`);
     const html = { outgoing: outgoingHtml, notice: noticeHtml, activity: activityHtml, incoming: incomingHtml, open: openHtml }[m]();
     if (html !== shownHtml) {
+      const scrolled = content.querySelector(".list")?.scrollTop || 0; // a rebuild must not jump the list back to the top
       content.innerHTML = html;
       shownHtml = html;
+      const list = content.querySelector(".list");
+      if (list && scrolled) list.scrollTop = scrolled;
       wireNameInput(); // only for freshly built content, so listeners aren't stacked
+    }
+  }
+  if (isCompact && !notch) {
+    // No notch (other Macs, Windows): the pill grows to fit its text instead of cutting it.
+    const row = content.querySelector(".row1");
+    if (row) {
+      const kids = [...row.children].filter((el) => !el.classList.contains("grow"));
+      const cs = getComputedStyle(row);
+      const need = kids.reduce((sum, el) => sum + (el.classList.contains("ellipsis") ? el.scrollWidth : el.offsetWidth), 0)
+        + (parseFloat(cs.columnGap) || 0) * Math.max(0, kids.length - 1)
+        + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + 4;
+      w = Math.min(Math.max(need, ROW_MIN), ROW_MAX);
+      setContentWidth(w);
     }
   }
   if (isCompact && notch) {
@@ -301,6 +358,8 @@ function morph(from, closing) {
   }
 }
 
+const ROW_MIN = 300;  // the pill without a notch: at least this wide,
+const ROW_MAX = 560;  // and past this, the detail ends with "…"
 const WING_PAD = 12;  // matches .wings horizontal padding
 const WING_MIN = 108; // the old fixed wing width
 const WING_MAX = 240; // past this, text ends with "…"
@@ -372,6 +431,11 @@ document.body.addEventListener("click", (e) => {
       invoke("refresh");
       setTimeout(() => { refreshing = false; render(); }, 1200); // matches the spin; results stream in via "state"
       break;
+    case "detail":
+      openRow = openRow === id ? "" : id; // opening one closes the one before it
+      render();
+      content.querySelector(".act-row.on")?.nextElementSibling?.scrollIntoView({ block: "nearest" });
+      break;
     case "tab":
       tab = v;
       if (tab === "updates") unread = 0;
@@ -387,6 +451,8 @@ document.body.addEventListener("click", (e) => {
 
 listen("update", (e) => { latest = e.payload.latest; render(); });
 listen("activity", (e) => showActivity(e.payload));
+// Keep the Updates tab honest while it's open: ages tick, a silent deploy turns to "no result yet".
+setInterval(() => { if (currentMode() === "open" && tab === "updates") render(); }, 30000);
 listen("hover", (e) => { hovering = e.payload; if (hovering && tab === "updates") unread = 0; render(); });
 listen("state", (e) => { state = e.payload; render(); });
 listen("incoming", (e) => { incoming = e.payload; render(); });

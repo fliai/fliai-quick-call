@@ -2,11 +2,18 @@
 #
 # Runs only on the DevOps laptop's self-hosted runner (label `lan-relay`). It hands each event
 # to the Quick Call app on that laptop (127.0.0.1), which pushes it to every teammate on the
-# office LAN. No cloud service, no polling, no quota. When the laptop is away, nothing is sent:
-# events older than 10 minutes are skipped, never replayed.
+# office LAN. No cloud service, no polling, no quota. When the laptop is away, jobs wait for it;
+# on return the app drops events older than 10 minutes, except a late result for a deploy or
+# pull request it is still showing as in progress (that row is settled quietly).
+#
+# Who is shown: the person who wrote the change, never who merged it. A pull request shows its
+# author. A deploy shows the authors of the commits the push brought in, read with git from the
+# commit history (kept in ~/.cache/quickcall-relay on the laptop). If that can't be read, no
+# name is shown rather than a wrong one.
 #
 # Security: workflow_run, pull_request_target and issues always run this file from the default
-# branch, and the job never checks out code, so a pull request can't run its own commands here.
+# branch, and the job never checks out or runs repository code (it fetches commit history only,
+# no file contents), so a pull request can't run its own commands here. The token is read-only.
 # Titles reach the script through env vars only, never through ${{ }} inside `run`.
 name: status-relay
 
@@ -15,11 +22,12 @@ on:
     workflows: [deploy, CI/CD] # the deploy workflow's name in each repo
     types: [requested, completed]
   pull_request_target:
-    types: [opened, closed]
+    types: [opened, reopened, closed]
   issues:
     types: [opened]
 
-permissions: {}
+permissions:
+  contents: read # git fetch of commit history, to name a deploy's authors
 
 jobs:
   relay:
@@ -36,21 +44,26 @@ jobs:
           EVENT: ${{ github.event_name }}
           ACTION: ${{ github.event.action }}
           REPO: ${{ github.event.repository.name }}
-          ACTOR: ${{ github.event.sender.login }}
+          REPO_FULL: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_AT: ${{ github.event.workflow_run.updated_at }}
+          RUN_STARTED: ${{ github.event.workflow_run.run_started_at }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_MERGED: ${{ github.event.pull_request.merged }}
           PR_AT: ${{ github.event.pull_request.updated_at }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_AT: ${{ github.event.issue.created_at }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
         run: |
           python3 -I - <<'PY'
-          import datetime, json, os, socket, sys, time
+          import base64, datetime, json, os, re, socket, subprocess, sys, time
           e = lambda k: os.environ.get(k, "")
           def ts(s):
               try:
@@ -60,6 +73,40 @@ jobs:
           def skip(why):
               print(f"skipped: {why}")
               sys.exit(0)
+          def first_name(name):
+              """ "Akash Maheema" and the login "AkashMaheema" both read "Akash". """
+              word = (re.split(r"[\s._-]+", name.strip()) or [""])[0]
+              m = re.match(r"[A-Z]?[a-z]+", word)
+              return (m.group(0) if m and len(m.group(0)) > 2 else word).capitalize() if word else ""
+          def authors(repo, sha, token):
+              """Who wrote the commits a push brought in (not who merged them). "" if it can't be told."""
+              if not re.fullmatch(r"[0-9a-f]{40}", sha) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+                  return ""
+              # Commit history only (no file contents), kept between runs so each fetch is a few new commits.
+              cache = os.path.join(os.path.expanduser("~"), ".cache", "quickcall-relay", repo.replace("/", "__") + ".git")
+              env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+              def git(*args, timeout=20):
+                  return subprocess.run(["git", "--git-dir", cache, *args], capture_output=True, text=True, timeout=timeout, env=env)
+              try:
+                  if not os.path.isdir(cache):
+                      os.makedirs(os.path.dirname(cache), exist_ok=True)
+                      subprocess.run(["git", "init", "-q", "--bare", cache], check=True, timeout=20, env=env)
+                      git("remote", "add", "origin", f"https://github.com/{repo}.git")
+                      git("config", "remote.origin.promisor", "true")
+                      git("config", "remote.origin.partialclonefilter", "tree:0")
+                  basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+                  got = git("-c", "credential.helper=", "-c", f"http.extraheader=AUTHORIZATION: basic {basic}",
+                            "fetch", "-q", "--no-tags", "--filter=tree:0", "origin", sha, timeout=60)
+                  if got.returncode:
+                      print("authors: fetch failed:", got.stderr.strip().splitlines()[-1:] or "")
+                      return ""
+                  # Everything this push added on top of the branch; merge commits themselves don't count.
+                  out = git("log", "--no-merges", "--format=%an", f"{sha}^1..{sha}").stdout or git("log", "-1", "--format=%an", sha).stdout
+              except (OSError, subprocess.SubprocessError) as err:
+                  print("authors:", err)
+                  return ""
+              names = list(dict.fromkeys(filter(None, (first_name(n) for n in out.splitlines() if not n.strip().endswith("[bot]")))))
+              return ", ".join(names[:2]) + (f" +{len(names) - 2}" if len(names) > 2 else "")
 
           if e("EVENT") == "workflow_run":
               env = {"staging": "staging", "main": "production"}.get(e("RUN_BRANCH"))
@@ -68,21 +115,23 @@ jobs:
               if e("ACTION") == "requested":
                   state = "started"
               else:
-                  state = {"success": "success", "failure": "failure", "timed_out": "failure", "cancelled": "cancelled"}.get(e("RUN_CONCLUSION"))
-              if not state:
-                  skip(f"conclusion {e('RUN_CONCLUSION')}")
-              ev = dict(id=f"{e('REPO')}:run:{e('RUN_ID')}:{state}", kind="deploy", state=state, env=env, number=0, title="", at=ts(e("RUN_AT")))
+                  # Anything we can't name is sent as "unknown" (shown as "not available"), never guessed.
+                  state = {"success": "success", "failure": "failure", "timed_out": "failure", "startup_failure": "failure", "cancelled": "cancelled"}.get(e("RUN_CONCLUSION"), "unknown")
+              # A re-run keeps its run id: the newer time moves the same row back to "deploying…".
+              at = ts(e("RUN_STARTED") or e("RUN_AT")) if state == "started" else ts(e("RUN_AT"))
+              ev = dict(id=f"{e('REPO')}:run:{e('RUN_ID')}:{state}", kind="deploy", state=state, env=env, number=0, title="", at=at, actor=authors(e("REPO_FULL"), e("RUN_SHA"), e("GH_TOKEN")))
           elif e("EVENT") == "pull_request_target":
-              state = "opened" if e("ACTION") == "opened" else ("merged" if e("PR_MERGED") == "true" else "closed")
-              ev = dict(id=f"{e('REPO')}:pr:{e('PR_NUMBER')}:{state}", kind="pr", state=state, env="", number=int(e("PR_NUMBER") or 0), title=e("PR_TITLE"), at=ts(e("PR_AT")))
+              # A reopened pull request shows as "opened" again (its newer time replaces "closed").
+              state = "opened" if e("ACTION") in ("opened", "reopened") else ("merged" if e("PR_MERGED") == "true" else "closed")
+              ev = dict(id=f"{e('REPO')}:pr:{e('PR_NUMBER')}:{state}", kind="pr", state=state, env="", number=int(e("PR_NUMBER") or 0), title=e("PR_TITLE"), at=ts(e("PR_AT")), actor=first_name(e("PR_AUTHOR")))
           elif e("EVENT") == "issues":
-              ev = dict(id=f"{e('REPO')}:issue:{e('ISSUE_NUMBER')}:opened", kind="issue", state="opened", env="", number=int(e("ISSUE_NUMBER") or 0), title=e("ISSUE_TITLE"), at=ts(e("ISSUE_AT")))
+              ev = dict(id=f"{e('REPO')}:issue:{e('ISSUE_NUMBER')}:opened", kind="issue", state="opened", env="", number=int(e("ISSUE_NUMBER") or 0), title=e("ISSUE_TITLE"), at=ts(e("ISSUE_AT")), actor=first_name(e("ISSUE_AUTHOR")))
           else:
               skip(f"event {e('EVENT')}")
-          ev.update(repo=e("REPO"), actor=e("ACTOR"))
+          ev.update(repo=e("REPO"))
 
-          if time.time() - ev["at"] > 600:
-              skip("older than 10 minutes (laptop was away)")
+          # No age check here: the app drops old events itself, except a late result that
+          # settles a row still waiting (a deploy that finished while the laptop was offline).
           try:
               with socket.create_connection(("127.0.0.1", 47800), timeout=3) as s:
                   s.sendall((json.dumps({"t": "publish", "ev": ev}) + "\n").encode())

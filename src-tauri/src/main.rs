@@ -30,7 +30,8 @@ const NET_TIMEOUT: Duration = Duration::from_millis(1500);
 const CALL_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 // Deployment / GitHub activity pushed by the DevOps relay (see .github/status-relay.yml).
 const ACTIVITY_KEEP: usize = 20; // recent events kept for the open island
-const ACTIVITY_MAX_AGE_SECS: u64 = 10 * 60; // older events are dropped, never replayed
+const ACTIVITY_MAX_AGE_SECS: u64 = 10 * 60; // older events are dropped, unless they update a row already shown
+const ACTIVITY_ROW_LIFE_SECS: u64 = 12 * 60 * 60; // rows older than this leave the list (nothing from a previous day)
 const FLASH_FOR: Duration = Duration::from_secs(6); // red border on a failed deploy
 
 // ---------- state ----------
@@ -51,6 +52,8 @@ struct Peer {
     addr: SocketAddr,
     online: bool,
     misses: u8,
+    /// (our digest, their digest) of the updates list when we last compared with this peer.
+    synced: (u64, u64),
 }
 
 struct Incoming {
@@ -66,7 +69,7 @@ struct Activity {
     id: String,    // unique per event, used to drop duplicates
     repo: String,  // e.g. "snap-core"
     kind: String,  // "deploy" | "pr" | "issue"
-    state: String, // deploy: "started" | "success" | "failure" | "cancelled"; pr: "opened" | "merged" | "closed"; issue: "opened"
+    state: String, // deploy: "started" | "success" | "failure" | "cancelled" | "unknown" (result not available); pr: "opened" | "merged" | "closed"; issue: "opened"
     #[serde(default)]
     env: String, // deploy: "staging" | "production"
     #[serde(default)]
@@ -74,7 +77,7 @@ struct Activity {
     #[serde(default)]
     number: u64,
     #[serde(default)]
-    actor: String,
+    actor: String, // who wrote the change (commit / pull request author), never who merged it; "" if not known
     at: u64, // unix seconds when it happened
 }
 
@@ -157,7 +160,9 @@ fn view(s: &State) -> StateView {
         })
         .collect();
     peers.sort_by(|a, b| rank(&a.status).cmp(&rank(&b.status)).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
-    StateView { me: s.me.clone(), peers, activity: s.activity.clone() }
+    let now = now_secs();
+    let activity = s.activity.iter().filter(|a| a.at + ACTIVITY_ROW_LIFE_SECS >= now).cloned().collect();
+    StateView { me: s.me.clone(), peers, activity }
 }
 
 fn push_state(app: &AppHandle, shared: &Shared) {
@@ -218,6 +223,9 @@ enum Msg {
     Publish { ev: Activity },
     /// From a peer: an activity event to show.
     Status { ev: Activity },
+    /// From a peer whose updates list differs from ours: its rows, merged in quietly so a
+    /// row we missed the result for (asleep, off the network) catches up.
+    Sync { evs: Vec<Activity> },
 }
 
 fn send(addr: SocketAddr, msg: &Msg) -> std::io::Result<Value> {
@@ -263,7 +271,7 @@ fn upsert_peer(shared: &Shared, id: String, name: String, status: String, addr: 
     if online && !s.peers.contains_key(&id) {
         s.peers.retain(|_, p| p.addr != addr && (p.online || !p.name.eq_ignore_ascii_case(&name)));
     }
-    let p = s.peers.entry(id).or_insert(Peer { name: String::new(), status: String::new(), addr, online, misses: 0 });
+    let p = s.peers.entry(id).or_insert(Peer { name: String::new(), status: String::new(), addr, online, misses: 0, synced: (0, 0) });
     p.name = name;
     p.addr = addr;
     p.online = online;
@@ -304,7 +312,7 @@ fn handle_conn(app: AppHandle, shared: Shared, mut stream: TcpStream) {
     let reply = match msg {
         Msg::Info => {
             let s = shared.lock().unwrap();
-            json!({ "id": s.me.id, "name": s.me.name, "status": s.me.status, "port": s.port })
+            json!({ "id": s.me.id, "name": s.me.name, "status": s.me.status, "port": s.port, "act": activity_digest(&s.activity).to_string() })
         }
         Msg::Hello { id, name, status, port } => {
             upsert_peer(&shared, clean(&id, 64), clean(&name, 40), clean(&status, 16), SocketAddr::new(ip, port));
@@ -349,14 +357,29 @@ fn handle_conn(app: AppHandle, shared: Shared, mut stream: TcpStream) {
             if !ip.is_loopback() {
                 json!({ "error": "local only" })
             } else {
-                match accept_activity(&app, &shared, ev) {
-                    Some(ev) => json!({ "sent": broadcast_activity(&shared, &ev) }),
+                match valid_activity(ev, now_secs()) {
+                    // Passed on even when it changes nothing here (this app may have restarted):
+                    // a teammate can still be showing the row this event settles.
+                    Some(ev) => {
+                        let kept = accept_activity(&app, &shared, &ev);
+                        json!({ "kept": kept, "sent": broadcast_activity(&shared, &ev) })
+                    }
                     None => json!({ "skipped": true }),
                 }
             }
         }
         Msg::Status { ev } => {
-            accept_activity(&app, &shared, ev);
+            if let Some(ev) = valid_activity(ev, now_secs()) {
+                accept_activity(&app, &shared, &ev);
+            }
+            json!({})
+        }
+        Msg::Sync { evs } => {
+            for ev in evs.into_iter().take(ACTIVITY_KEEP) {
+                if let Some(ev) = valid_activity(ev, now_secs()) {
+                    accept_activity(&app, &shared, &ev);
+                }
+            }
             json!({})
         }
     };
@@ -369,15 +392,25 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// A deploy's events share an id up to the last ":" ("snap-core:run:123:started" and
-/// "snap-core:run:123:success"), so its start and finish can be shown as one row.
+/// The events of one deploy, pull request or issue share an id up to the last ":"
+/// ("snap-core:run:123:started" / ":success", "snap-core:pr:12:opened" / ":merged"),
+/// so they can be shown as one row.
 fn run_key(id: &str) -> &str {
     id.rsplit_once(':').map_or(id, |(k, _)| k)
 }
 
-/// Clean an incoming event, drop it if it's stale, unknown or already seen, then store and show it.
-/// Returns the stored event so the relay can pass it on.
-fn accept_activity(app: &AppHandle, shared: &Shared, ev: Activity) -> Option<Activity> {
+/// A fingerprint of the updates list, compared between peers to notice when one missed something.
+fn activity_digest(rows: &[Activity]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut keys: Vec<(&str, u64)> = rows.iter().map(|a| (a.id.as_str(), a.at)).collect();
+    keys.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    keys.hash(&mut h);
+    h.finish()
+}
+
+/// Clean an incoming event; None if it's unknown, from the future, or older than a row may live.
+fn valid_activity(ev: Activity, now: u64) -> Option<Activity> {
     let ev = Activity {
         id: clean(&ev.id, 120),
         repo: clean(&ev.repo, 40),
@@ -386,42 +419,67 @@ fn accept_activity(app: &AppHandle, shared: &Shared, ev: Activity) -> Option<Act
         env: clean(&ev.env, 12),
         title: clean(&ev.title, 120),
         number: ev.number,
-        actor: clean(&ev.actor, 40),
+        actor: clean(&ev.actor, 60),
         at: ev.at,
     };
-    let now = now_secs();
     let known = matches!(
         (ev.kind.as_str(), ev.state.as_str()),
-        ("deploy", "started" | "success" | "failure" | "cancelled") | ("pr", "opened" | "merged" | "closed") | ("issue", "opened")
+        ("deploy", "started" | "success" | "failure" | "cancelled" | "unknown") | ("pr", "opened" | "merged" | "closed") | ("issue", "opened")
     );
-    if !known || ev.id.is_empty() || ev.repo.is_empty() || ev.at + ACTIVITY_MAX_AGE_SECS < now || ev.at > now + 120 {
-        return None;
-    }
-    let (busy, wanted) = {
-        let mut s = shared.lock().unwrap();
-        if s.activity.iter().any(|a| a.id == ev.id) {
-            return None;
-        }
-        if ev.kind == "deploy" {
-            let key = run_key(&ev.id).to_string();
-            let same_run = |a: &Activity| a.kind == "deploy" && run_key(&a.id) == key;
-            if ev.state == "started" {
-                // A start that arrives after its own finish changes nothing.
-                if s.activity.iter().any(same_run) {
-                    return None;
-                }
-            } else {
-                // The finish replaces this deploy's "deploying…" row (one row per deploy).
-                s.activity.retain(|a| !same_run(a));
+    let ok = known && !ev.id.is_empty() && !ev.repo.is_empty() && ev.at <= now + 120 && ev.at + ACTIVITY_ROW_LIFE_SECS >= now;
+    ok.then_some(ev)
+}
+
+/// Put an event into the list. Returns false if it changes nothing.
+///
+/// Each deploy, pull request or issue is ONE row that follows its lifecycle. The newest event
+/// (by the time it happened) wins, whatever order events arrive in:
+///   deploying… → deployed / failed / cancelled → deploying… again on a re-run
+///   opened → merged / closed → opened again on a reopen
+fn merge_activity(rows: &mut Vec<Activity>, ev: &Activity, now: u64) -> bool {
+    rows.retain(|a| a.at + ACTIVITY_ROW_LIFE_SECS >= now);
+    let key = run_key(&ev.id);
+    let is_open = |state: &str| matches!(state, "started" | "opened");
+    match rows.iter().find(|a| run_key(&a.id) == key) {
+        Some(row) => {
+            // Older than what's shown, or the same moment without moving the row forward
+            // (a duplicate, or a start delivered after its own finish): nothing changes.
+            let forward = ev.at > row.at || (ev.at == row.at && is_open(&row.state) && !is_open(&ev.state));
+            if !forward {
+                return false;
             }
         }
-        s.activity.insert(0, ev.clone());
-        s.activity.truncate(ACTIVITY_KEEP);
+        // An old event for something we aren't showing is dropped, never replayed. A late
+        // event is only kept above, where it corrects a row that would otherwise be wrong
+        // (the relay laptop or this one was offline when it happened).
+        None if is_late(ev, now) => return false,
+        None => {}
+    }
+    rows.retain(|a| run_key(&a.id) != key);
+    rows.insert(0, ev.clone());
+    rows.sort_by(|a, b| b.at.cmp(&a.at)); // stable: newest first, late results fall into place
+    rows.truncate(ACTIVITY_KEEP);
+    true
+}
+
+fn is_late(ev: &Activity, now: u64) -> bool {
+    ev.at + ACTIVITY_MAX_AGE_SECS < now
+}
+
+/// Store a valid event and show it. Returns false if it changed nothing here.
+fn accept_activity(app: &AppHandle, shared: &Shared, ev: &Activity) -> bool {
+    let now = now_secs();
+    let (busy, wanted) = {
+        let mut s = shared.lock().unwrap();
+        if !merge_activity(&mut s.activity, ev, now) {
+            return false;
+        }
         (s.me.status == "busy", s.me.activity)
     };
     push_state(app, shared);
-    if !wanted {
-        return Some(ev); // kept quietly (the relay still passes it on); nothing is shown
+    // A late event only corrects its row: no notice, no flash.
+    if !wanted || is_late(ev, now) {
+        return true;
     }
     let _ = app.emit("activity", ev.clone());
     // A failed deploy flashes a red border, like a call, unless they're on Busy (do not disturb).
@@ -429,7 +487,7 @@ fn accept_activity(app: &AppHandle, shared: &Shared, ev: Activity) -> Option<Act
         let short = ev.repo.trim_start_matches("snap-").to_string();
         flash(app, &format!("{short} → {} deploy failed", if ev.env.is_empty() { "?" } else { &ev.env }));
     }
-    Some(ev)
+    true
 }
 
 /// Push an event to every peer that's online. Returns how many were reached.
@@ -971,8 +1029,16 @@ fn poll_once(app: &AppHandle, shared: &Shared) {
             handles.into_iter().filter_map(|h| h.join().ok()).collect()
         });
         let mut changed = false;
-        {
+        let mut to_sync: Vec<SocketAddr> = Vec::new();
+        let rows = {
             let mut s = shared.lock().unwrap();
+            // Rows from a previous day leave the list.
+            let now = now_secs();
+            let before = s.activity.len();
+            s.activity.retain(|a| a.at + ACTIVITY_ROW_LIFE_SECS >= now);
+            changed |= s.activity.len() != before;
+            let mine = activity_digest(&s.activity);
+            let rows = s.activity.clone();
             for (id, res) in results {
                 let Some(p) = s.peers.get_mut(&id) else { continue };
                 match res {
@@ -986,6 +1052,17 @@ fn poll_once(app: &AppHandle, shared: &Shared) {
                         p.misses = 0;
                         p.name = name;
                         p.status = status;
+                        // Their updates list differs from ours (they or we missed something):
+                        // send ours once per difference; they merge what moves a row forward.
+                        // Peers on an older version send no digest and are left alone.
+                        if let Some(theirs) = info.get("act").and_then(Value::as_str).and_then(|d| d.parse::<u64>().ok()) {
+                            if p.synced != (mine, theirs) {
+                                p.synced = (mine, theirs);
+                                if mine != theirs && !rows.is_empty() {
+                                    to_sync.push(p.addr);
+                                }
+                            }
+                        }
                     }
                     None => {
                         p.misses = p.misses.saturating_add(1);
@@ -996,9 +1073,19 @@ fn poll_once(app: &AppHandle, shared: &Shared) {
                     }
                 }
             }
-        }
+            rows
+        };
         if changed {
             push_state(app, shared);
+        }
+        if !to_sync.is_empty() {
+            let msg = Msg::Sync { evs: rows };
+            thread::scope(|sc| {
+                for a in to_sync {
+                    let msg = &msg;
+                    sc.spawn(move || send(a, msg));
+                }
+            });
         }
     }
 }
@@ -1111,4 +1198,126 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running FLiAI Quick Call");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: u64 = 1_800_000_000;
+    const MIN: u64 = 60;
+    const HOUR: u64 = 3600;
+
+    fn ev(id: &str, state: &str, at: u64) -> Activity {
+        let kind = if id.contains(":run:") { "deploy" } else if id.contains(":pr:") { "pr" } else { "issue" };
+        Activity { id: format!("{id}:{state}"), repo: "snap-core".into(), kind: kind.into(), state: state.into(), env: "staging".into(), title: String::new(), number: 1, actor: String::new(), at }
+    }
+    fn states(rows: &[Activity]) -> Vec<&str> {
+        rows.iter().map(|a| a.state.as_str()).collect()
+    }
+
+    #[test]
+    fn deploy_is_one_row_through_its_lifecycle() {
+        let mut rows = vec![];
+        assert!(merge_activity(&mut rows, &ev("c:run:1", "started", NOW - 5 * MIN), NOW - 5 * MIN));
+        assert!(merge_activity(&mut rows, &ev("c:run:1", "success", NOW), NOW));
+        assert_eq!(states(&rows), ["success"]);
+    }
+
+    #[test]
+    fn pr_opened_becomes_merged_then_reopen_and_close() {
+        let mut rows = vec![];
+        assert!(merge_activity(&mut rows, &ev("c:pr:9", "opened", NOW), NOW));
+        assert!(merge_activity(&mut rows, &ev("c:pr:9", "closed", NOW + MIN), NOW + MIN));
+        assert_eq!(states(&rows), ["closed"]);
+        assert!(merge_activity(&mut rows, &ev("c:pr:9", "opened", NOW + 2 * MIN), NOW + 2 * MIN)); // reopened
+        assert_eq!(states(&rows), ["opened"]);
+        assert!(merge_activity(&mut rows, &ev("c:pr:9", "merged", NOW + 3 * MIN), NOW + 3 * MIN));
+        assert_eq!(states(&rows), ["merged"]);
+    }
+
+    #[test]
+    fn duplicates_and_out_of_order_change_nothing() {
+        let mut rows = vec![];
+        let (start, done) = (ev("c:run:1", "started", NOW), ev("c:run:1", "success", NOW + 5 * MIN));
+        assert!(merge_activity(&mut rows, &done, NOW + 5 * MIN));
+        assert!(!merge_activity(&mut rows, &start, NOW + 5 * MIN)); // start delivered after its finish
+        assert!(!merge_activity(&mut rows, &done, NOW + 5 * MIN)); // the same event again
+        assert_eq!(states(&rows), ["success"]);
+        // Start and finish stamped with the same second: the finish still wins.
+        let mut rows = vec![];
+        assert!(merge_activity(&mut rows, &ev("c:run:2", "started", NOW), NOW));
+        assert!(merge_activity(&mut rows, &ev("c:run:2", "failure", NOW), NOW));
+        assert!(!merge_activity(&mut rows, &ev("c:run:2", "started", NOW), NOW));
+        assert_eq!(states(&rows), ["failure"]);
+    }
+
+    #[test]
+    fn rerun_of_a_failed_deploy_reuses_its_row() {
+        let mut rows = vec![];
+        merge_activity(&mut rows, &ev("c:run:1", "started", NOW), NOW);
+        merge_activity(&mut rows, &ev("c:run:1", "failure", NOW + MIN), NOW + MIN);
+        assert!(merge_activity(&mut rows, &ev("c:run:1", "started", NOW + 2 * MIN), NOW + 2 * MIN));
+        assert_eq!(states(&rows), ["started"]);
+        assert!(merge_activity(&mut rows, &ev("c:run:1", "failure", NOW + 3 * MIN), NOW + 3 * MIN)); // fails again
+        assert_eq!(states(&rows), ["failure"]);
+    }
+
+    #[test]
+    fn late_result_settles_a_waiting_row_but_old_news_is_dropped() {
+        // Relay laptop offline for two hours mid-deploy.
+        let mut rows = vec![];
+        merge_activity(&mut rows, &ev("c:run:1", "started", NOW), NOW);
+        let later = NOW + 2 * HOUR;
+        assert!(merge_activity(&mut rows, &ev("c:run:1", "success", NOW + 5 * MIN), later));
+        assert_eq!(states(&rows), ["success"]);
+        // Deploys and pull requests that happened entirely while away: nothing is replayed.
+        assert!(!merge_activity(&mut rows, &ev("c:run:2", "started", NOW + 20 * MIN), later));
+        assert!(!merge_activity(&mut rows, &ev("c:run:2", "success", NOW + 25 * MIN), later));
+        assert!(!merge_activity(&mut rows, &ev("c:pr:3", "merged", NOW + 30 * MIN), later));
+        assert_eq!(rows.len(), 1);
+        // A pull request opened before leaving, merged while away.
+        let mut rows = vec![];
+        merge_activity(&mut rows, &ev("c:pr:4", "opened", NOW), NOW);
+        assert!(merge_activity(&mut rows, &ev("c:pr:4", "merged", NOW + HOUR), later));
+        assert_eq!(states(&rows), ["merged"]);
+    }
+
+    #[test]
+    fn two_deploys_at_once_stay_separate_and_newest_is_first() {
+        let mut rows = vec![];
+        merge_activity(&mut rows, &ev("c:run:1", "started", NOW), NOW);
+        merge_activity(&mut rows, &ev("c:run:2", "started", NOW + MIN), NOW + MIN);
+        merge_activity(&mut rows, &ev("c:run:1", "success", NOW + 2 * MIN), NOW + 2 * MIN);
+        assert_eq!(rows.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["c:run:1:success", "c:run:2:started"]);
+    }
+
+    #[test]
+    fn rows_from_a_previous_day_leave_and_the_list_is_capped() {
+        let mut rows = vec![];
+        merge_activity(&mut rows, &ev("c:pr:1", "opened", NOW), NOW);
+        let next_day = NOW + 13 * HOUR;
+        assert!(merge_activity(&mut rows, &ev("c:pr:2", "opened", next_day), next_day));
+        assert_eq!(rows.len(), 1); // yesterday's row is gone
+        assert!(valid_activity(ev("c:pr:1", "merged", NOW), next_day).is_none()); // too old to show at all
+        for n in 0..30 {
+            merge_activity(&mut rows, &ev(&format!("c:pr:{}", 100 + n), "opened", next_day + n), next_day + n);
+        }
+        assert_eq!(rows.len(), ACTIVITY_KEEP);
+    }
+
+    #[test]
+    fn unknown_or_future_events_are_refused() {
+        assert!(valid_activity(ev("c:pr:1", "approved", NOW), NOW).is_none());
+        assert!(valid_activity(ev("c:run:1", "success", NOW + HOUR), NOW).is_none());
+        assert!(valid_activity(ev("c:run:1", "success", NOW), NOW).is_some());
+        assert!(valid_activity(ev("c:run:1", "unknown", NOW), NOW).is_some()); // shown as "not available"
+    }
+
+    #[test]
+    fn digest_ignores_order_and_changes_with_state() {
+        let (a, b) = (ev("c:run:1", "started", NOW), ev("c:pr:2", "opened", NOW));
+        assert_eq!(activity_digest(&[a.clone(), b.clone()]), activity_digest(&[b.clone(), a.clone()]));
+        assert_ne!(activity_digest(&[a, b.clone()]), activity_digest(&[ev("c:run:1", "success", NOW), b]));
+    }
 }

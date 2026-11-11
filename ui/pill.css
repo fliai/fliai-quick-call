@@ -220,10 +220,23 @@ button.x { width: 24px; height: 24px; padding: 0; display: grid; place-items: ce
 .icon.act.success, .icon.act.pr-merged { background: var(--green); color: #00230b; }
 .icon.act.failure { background: var(--red); }
 .icon.act.cancelled, .icon.act.pr-closed { background: var(--grey); }
+/* Result not available: a hollow dashed ring, so it can't be read as cancelled or closed. */
+.icon.act.unknown { background: transparent; border: 1.5px dashed var(--grey); color: var(--muted); }
+/* What it is + its status: never cut short. Only the detail after it ends with "…". */
+.keep { flex: none; white-space: nowrap; }
+.row1 .keep + .ellipsis, .wing .keep + .ellipsis { color: var(--muted); }
 .icon.act.pr-opened { background: #bf5af2; }
 .icon.act.issue-opened { background: var(--blue); }
 
-.act-row { display: flex; align-items: center; gap: 8px; padding: 4px; font-size: 12px; }
+.act-row { display: flex; align-items: center; gap: 8px; padding: 4px; font-size: 12px; overflow: hidden; }
+.act-row .keep { color: var(--text); }
+button.act-row { width: 100%; background: none; border: 0; border-radius: 8px; color: inherit; font: inherit; font-size: 12px; text-align: left; cursor: pointer; scale: 1; }
+button.act-row:hover, button.act-row.on { background: rgba(255, 255, 255, 0.07); }
+.act-detail { margin: 2px 4px 6px 30px; padding: 7px 9px; border-radius: 8px; background: rgba(255, 255, 255, 0.05); font-size: 12px; }
+.act-detail .t { color: var(--text); line-height: 1.35; margin-bottom: 6px; overflow-wrap: anywhere; }
+.act-detail .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; }
+.act-detail .k { color: var(--grey); }
+.act-detail .v { color: var(--text); overflow-wrap: anywhere; }
 .act-row .icon { width: 18px; height: 18px; font-size: 10px; }
 .act-row .ellipsis { flex: 1; color: var(--muted); }
 .act-row b { color: var(--text); font-weight: 600; }
@@ -307,3 +320,5 @@ button.x { width: 24px; height: 24px; padding: 0; display: grid; place-items: ce
    inside the middle column can spill past it. */
 .head .hc { min-width: 0; overflow: hidden; }
 .head .hc::after { min-width: 10px; }
+
+button.act-row:active { scale: 1; }
