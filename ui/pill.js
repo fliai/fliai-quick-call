@@ -163,7 +163,7 @@ function openHtml() {
         </div>`).join("")
     : `<div class="empty">No one yet. Teammates appear here<br>when they run FLiAI Quick Call on the same Wi-Fi.</div>`;
 
-  const items = (state.activity || []).slice(0, 10);
+  const items = (state.activity || []);
   const updates = items.length
     ? items.map((ev) => {
         const { head, tail } = actText(ev);

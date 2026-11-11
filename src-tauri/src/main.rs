@@ -369,6 +369,12 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// A deploy's events share an id up to the last ":" ("snap-core:run:123:started" and
+/// "snap-core:run:123:success"), so its start and finish can be shown as one row.
+fn run_key(id: &str) -> &str {
+    id.rsplit_once(':').map_or(id, |(k, _)| k)
+}
+
 /// Clean an incoming event, drop it if it's stale, unknown or already seen, then store and show it.
 /// Returns the stored event so the relay can pass it on.
 fn accept_activity(app: &AppHandle, shared: &Shared, ev: Activity) -> Option<Activity> {
@@ -395,6 +401,19 @@ fn accept_activity(app: &AppHandle, shared: &Shared, ev: Activity) -> Option<Act
         let mut s = shared.lock().unwrap();
         if s.activity.iter().any(|a| a.id == ev.id) {
             return None;
+        }
+        if ev.kind == "deploy" {
+            let key = run_key(&ev.id).to_string();
+            let same_run = |a: &Activity| a.kind == "deploy" && run_key(&a.id) == key;
+            if ev.state == "started" {
+                // A start that arrives after its own finish changes nothing.
+                if s.activity.iter().any(same_run) {
+                    return None;
+                }
+            } else {
+                // The finish replaces this deploy's "deploying…" row (one row per deploy).
+                s.activity.retain(|a| !same_run(a));
+            }
         }
         s.activity.insert(0, ev.clone());
         s.activity.truncate(ACTIVITY_KEEP);
