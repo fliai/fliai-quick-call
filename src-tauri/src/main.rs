@@ -69,7 +69,7 @@ struct Activity {
     id: String,    // unique per event, used to drop duplicates
     repo: String,  // e.g. "snap-core"
     kind: String,  // "deploy" | "pr" | "issue"
-    state: String, // deploy: "started" | "success" | "failure" | "cancelled" | "unknown" (result not available); pr: "opened" | "merged" | "closed"; issue: "opened"
+    state: String, // deploy: "started" | "success" | "failure" | "cancelled" | "unknown" (result not available); pr: "opened" | "merged" | "closed"; issue: "opened" | "closed" (done) | "notplanned" (closed without doing it)
     #[serde(default)]
     env: String, // deploy: "staging" | "production"
     #[serde(default)]
@@ -424,7 +424,7 @@ fn valid_activity(ev: Activity, now: u64) -> Option<Activity> {
     };
     let known = matches!(
         (ev.kind.as_str(), ev.state.as_str()),
-        ("deploy", "started" | "success" | "failure" | "cancelled" | "unknown") | ("pr", "opened" | "merged" | "closed") | ("issue", "opened")
+        ("deploy", "started" | "success" | "failure" | "cancelled" | "unknown") | ("pr", "opened" | "merged" | "closed") | ("issue", "opened" | "closed" | "notplanned")
     );
     let ok = known && !ev.id.is_empty() && !ev.repo.is_empty() && ev.at <= now + 120 && ev.at + ACTIVITY_ROW_LIFE_SECS >= now;
     ok.then_some(ev)
@@ -435,7 +435,7 @@ fn valid_activity(ev: Activity, now: u64) -> Option<Activity> {
 /// Each deploy, pull request or issue is ONE row that follows its lifecycle. The newest event
 /// (by the time it happened) wins, whatever order events arrive in:
 ///   deploying… → deployed / failed / cancelled → deploying… again on a re-run
-///   opened → merged / closed → opened again on a reopen
+///   opened → merged / closed → opened again on a reopen (pull requests and issues)
 fn merge_activity(rows: &mut Vec<Activity>, ev: &Activity, now: u64) -> bool {
     rows.retain(|a| a.at + ACTIVITY_ROW_LIFE_SECS >= now);
     let key = run_key(&ev.id);
@@ -1234,6 +1234,21 @@ mod tests {
         assert_eq!(states(&rows), ["opened"]);
         assert!(merge_activity(&mut rows, &ev("c:pr:9", "merged", NOW + 3 * MIN), NOW + 3 * MIN));
         assert_eq!(states(&rows), ["merged"]);
+    }
+
+    #[test]
+    fn issue_opened_becomes_closed_then_reopen() {
+        let mut rows = vec![];
+        for (state, at) in [("opened", NOW), ("closed", NOW + MIN), ("opened", NOW + 2 * MIN), ("notplanned", NOW + 3 * MIN)] {
+            let e = valid_activity(ev("c:issue:376", state, at), at).expect("known issue state");
+            assert!(merge_activity(&mut rows, &e, at));
+            assert_eq!(states(&rows), [state]);
+        }
+        // Closed hours after it was opened, while the row is still showing: the row is corrected.
+        let mut rows = vec![];
+        merge_activity(&mut rows, &ev("c:issue:9", "opened", NOW), NOW);
+        assert!(merge_activity(&mut rows, &ev("c:issue:9", "closed", NOW + 3 * HOUR), NOW + 3 * HOUR));
+        assert_eq!(states(&rows), ["closed"]);
     }
 
     #[test]

@@ -24,7 +24,7 @@ on:
   pull_request_target:
     types: [opened, reopened, closed]
   issues:
-    types: [opened]
+    types: [opened, reopened, closed]
 
 permissions:
   contents: read # git fetch of commit history, to name a deploy's authors
@@ -60,6 +60,9 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_AT: ${{ github.event.issue.created_at }}
+          ISSUE_UPDATED: ${{ github.event.issue.updated_at }}
+          ISSUE_CLOSED: ${{ github.event.issue.closed_at }}
+          ISSUE_REASON: ${{ github.event.issue.state_reason }}
           ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
         run: |
           python3 -I - <<'PY'
@@ -125,7 +128,12 @@ jobs:
               state = "opened" if e("ACTION") in ("opened", "reopened") else ("merged" if e("PR_MERGED") == "true" else "closed")
               ev = dict(id=f"{e('REPO')}:pr:{e('PR_NUMBER')}:{state}", kind="pr", state=state, env="", number=int(e("PR_NUMBER") or 0), title=e("PR_TITLE"), at=ts(e("PR_AT")), actor=first_name(e("PR_AUTHOR")))
           elif e("EVENT") == "issues":
-              ev = dict(id=f"{e('REPO')}:issue:{e('ISSUE_NUMBER')}:opened", kind="issue", state="opened", env="", number=int(e("ISSUE_NUMBER") or 0), title=e("ISSUE_TITLE"), at=ts(e("ISSUE_AT")), actor=first_name(e("ISSUE_AUTHOR")))
+              # One row per issue: opened, closed (done) or notplanned (closed without doing it), opened again on a reopen.
+              if e("ACTION") == "closed":
+                  state, at = ("closed" if e("ISSUE_REASON") in ("", "completed") else "notplanned"), ts(e("ISSUE_CLOSED") or e("ISSUE_UPDATED"))
+              else:
+                  state, at = "opened", ts(e("ISSUE_AT") if e("ACTION") == "opened" else e("ISSUE_UPDATED"))
+              ev = dict(id=f"{e('REPO')}:issue:{e('ISSUE_NUMBER')}:{state}", kind="issue", state=state, env="", number=int(e("ISSUE_NUMBER") or 0), title=e("ISSUE_TITLE"), at=at, actor=first_name(e("ISSUE_AUTHOR")))
           else:
               skip(f"event {e('EVENT')}")
           ev.update(repo=e("REPO"))

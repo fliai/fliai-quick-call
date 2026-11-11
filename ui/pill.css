@@ -156,13 +156,15 @@ button.x { width: 24px; height: 24px; padding: 0; display: grid; place-items: ce
 /* ---------- compact live activity ---------- */
 
 /* Notch Macs: content lives in the two "wings" either side of the notch. */
-.wings { display: flex; align-items: center; height: var(--t); padding: 0 12px; }
-.wings .gap { flex: none; width: var(--nw); }
+/* 16px clear of the island's rounded ends, and 10px clear of the notch on each side, so
+   neither the icon nor the text ever sits against an edge. */
+.wings { display: flex; align-items: center; height: var(--t); padding: 0 16px; }
+.wings .gap { flex: none; width: calc(var(--nw) + 20px); }
 .wing { flex: 1; display: flex; align-items: center; gap: 7px; min-width: 0; }
 .wing.right { justify-content: flex-end; }
 
 /* Everywhere else: a single row. */
-.row1 { display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 8px 0 9px; }
+.row1 { display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 14px 0 9px; }
 .row1 .grow { flex: 1; }
 
 .icon { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; flex: none; }
@@ -217,9 +219,9 @@ button.x { width: 24px; height: 24px; padding: 0; display: grid; place-items: ce
 
 .icon.act { color: #fff; }
 .icon.act.started { background: transparent; border: 2px solid #ffd60a; border-top-color: transparent; animation: spin 0.9s linear infinite; }
-.icon.act.success, .icon.act.pr-merged { background: var(--green); color: #00230b; }
+.icon.act.success, .icon.act.pr-merged, .icon.act.issue-closed { background: var(--green); color: #00230b; }
 .icon.act.failure { background: var(--red); }
-.icon.act.cancelled, .icon.act.pr-closed { background: var(--grey); }
+.icon.act.cancelled, .icon.act.pr-closed, .icon.act.issue-notplanned { background: var(--grey); }
 /* Result not available: a hollow dashed ring, so it can't be read as cancelled or closed. */
 .icon.act.unknown { background: transparent; border: 1.5px dashed var(--grey); color: var(--muted); }
 /* What it is + its status: never cut short. Only the detail after it ends with "…". */
@@ -322,3 +324,24 @@ button.act-row:hover, button.act-row.on { background: rgba(255, 255, 255, 0.07);
 .head .hc::after { min-width: 10px; }
 
 button.act-row:active { scale: 1; }
+
+/* ---------- several updates in a row: the pill stays open and the text rolls up ---------- */
+/* A cube turning upward: the text on show tips back over the top edge while the next one
+   comes up from the face below. Both turn about the cube's centre (half its height behind). */
+.roll-in, .roll-out { transform-origin: 50% 50% calc(var(--rh, 38px) / -2); backface-visibility: hidden; will-change: transform; }
+.roll-in { animation: roll-in 0.55s cubic-bezier(0.45, 0, 0.2, 1) both; }
+.roll-out { position: absolute; top: 0; left: 50%; pointer-events: none; animation: roll-out 0.55s cubic-bezier(0.45, 0, 0.2, 1) both; }
+@keyframes roll-in {
+  from { transform: perspective(520px) rotateX(-90deg); opacity: 0.15; }
+  to { transform: perspective(520px) rotateX(0deg); opacity: 1; }
+}
+@keyframes roll-out {
+  from { transform: perspective(520px) rotateX(0deg); opacity: 1; }
+  to { transform: perspective(520px) rotateX(90deg); opacity: 0.15; }
+}
+.qn { flex: none; margin-right: 4px; padding: 2px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.14); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) {
+  .roll-in { animation: none; }
+  .roll-out { display: none; }
+}
+.row1:has(> button:last-child) { padding-right: 8px; } /* a round button sits snug in the rounded end */

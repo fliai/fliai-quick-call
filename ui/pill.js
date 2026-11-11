@@ -14,8 +14,11 @@ let editingName = false;
 let incoming = null; // { name, color }
 let outgoing = null; // { name, status, color }
 let notice = null;   // { name, answer, color }
-let act = null;      // the latest activity event, shown briefly
+let act = null;      // the activity event on show in the pill
+let actQueue = [];   // events waiting their turn in the pill (the Updates tab has them all already)
 let actTimer = null;
+let actUntil = 0;    // when the event on show gives way
+let shownActKey = ""; // which item the pill is showing, to roll only when it changes to another item
 let tab = "people";  // open island: "people" | "updates"
 let openRow = "";   // the update whose details are showing (one at a time)
 let unread = 0;      // updates that arrived while the Updates tab wasn't showing
@@ -75,7 +78,9 @@ function noticeHtml() {
 
 // ---------- deployment / GitHub activity ----------
 
-const ACT_ICON = { started: "", success: "✓", failure: "✕", cancelled: "–", unknown: "?", opened: "•", merged: "✓", closed: "–" };
+const ACT_ICON = { started: "", success: "✓", failure: "✕", cancelled: "–", unknown: "?", opened: "•", merged: "✓", closed: "–", notplanned: "–" };
+// An issue that's closed is done (a tick); "not planned" is the one that was dropped (a dash).
+const STATUS_TEXT = { notplanned: "not planned" };
 const repoShort = (r) => String(r).replace(/^snap-/, "");
 const ENV_SHORT = { production: "prod" };
 
@@ -96,13 +101,14 @@ function actText(ev) {
     return { head: `${repoShort(ev.repo)} → ${ENV_SHORT[ev.env] || ev.env || "?"}`, status, extra: who };
   }
   const label = ev.kind === "pr" ? "PR" : "Issue";
-  return { head: `${repoShort(ev.repo)} ${label} #${ev.number}`, status: ev.state, extra: [who, ev.title].filter(Boolean).join(" · ") };
+  return { head: `${repoShort(ev.repo)} ${label} #${ev.number}`, status: STATUS_TEXT[ev.state] || ev.state, extra: [who, ev.title].filter(Boolean).join(" · ") };
 }
 
 function actIcon(ev) {
   if (noResult(ev)) return `<span class="icon act unknown">?</span>`;
   const cls = ev.kind === "deploy" ? ev.state : `${ev.kind}-${ev.state}`;
-  return `<span class="icon act ${esc(cls)}">${ACT_ICON[ev.state] ?? "•"}</span>`;
+  const mark = cls === "issue-closed" ? "✓" : ACT_ICON[ev.state] ?? "•";
+  return `<span class="icon act ${esc(cls)}">${mark}</span>`;
 }
 
 function activityHtml() {
@@ -114,7 +120,7 @@ function activityHtml() {
       ? compact(`${actIcon(act)}<span class="keep">${esc(head)}</span>`, `<span class="keep">${esc(status)}</span>${more}`)
       : compact(`${actIcon(act)}<span class="keep">${esc(head)} ${esc(status)}</span>`, more);
   }
-  return compact(`${actIcon(act)}<span class="keep"><b>${esc(head)}</b> ${esc(status)}</span>${more}`, "");
+  return compact(`${actIcon(act)}<span class="keep"><b>${esc(head)}</b> ${esc(status)}</span>${more}`, actQueue.length ? `<span class="qn" title="More updates waiting">+${actQueue.length}</span>` : "");
 }
 
 // A row keeps its key through its lifecycle (the id without its state), so it stays open as it changes.
@@ -149,15 +155,56 @@ function clearActivity() {
   tab = "people";
   unread = 0;
   act = null;
+  actQueue = [];
   clearTimeout(actTimer);
+}
+
+// Several events close together take turns in the pill: it stays open and each rolls up into
+// the next. A lone event gets longer; a failed deploy longer still, and goes to the front.
+const ACT_QUEUE_MAX = 10;
+const actTime = (ev, waiting) => (ev.state === "failure" ? (waiting ? 5000 : 9000) : waiting ? 3000 : 5000);
+
+function armActivity(ms) {
+  clearTimeout(actTimer);
+  actUntil = Date.now() + ms;
+  actTimer = setTimeout(nextActivity, ms);
+}
+
+function nextActivity() {
+  clearTimeout(actTimer);
+  act = actQueue.shift() || null;
+  if (act) armActivity(actTime(act, actQueue.length > 0));
+  render();
 }
 
 function showActivity(ev) {
   if (!state.me.activity) return;
   if (!(hovering && tab === "updates")) unread++;
-  act = ev;
-  clearTimeout(actTimer);
-  actTimer = setTimeout(() => { act = null; render(); }, ev.state === "failure" ? 9000 : 5000);
+  const key = rowKey(ev);
+  if (act && rowKey(act) === key) {
+    // The item on show moved on (deploying… → deployed): update it in place.
+    act = ev;
+    armActivity(actTime(ev, actQueue.length > 0));
+    render();
+    return;
+  }
+  // Only the newest event of an item waits; an older one still queued is replaced.
+  actQueue = actQueue.filter((q) => rowKey(q) !== key);
+  const firstOther = actQueue.findIndex((q) => q.state !== "failure");
+  if (ev.state === "failure" && firstOther >= 0) actQueue.splice(firstOther, 0, ev);
+  else actQueue.push(ev);
+  while (actQueue.length > ACT_QUEUE_MAX) {
+    // Full: the oldest waiting one that isn't a failure gives up its turn (it's in the Updates tab).
+    const drop = actQueue.findIndex((q) => q.state !== "failure");
+    actQueue.splice(drop < 0 ? 0 : drop, 1);
+  }
+  if (!act) {
+    nextActivity();
+    return;
+  }
+  // Something is on show: it no longer gets its full time now that others wait.
+  const most = actTime(act, true);
+  if (actUntil - Date.now() > most) armActivity(most);
   render();
 }
 
@@ -278,8 +325,17 @@ function render() {
     const html = { outgoing: outgoingHtml, notice: noticeHtml, activity: activityHtml, incoming: incomingHtml, open: openHtml }[m]();
     if (html !== shownHtml) {
       const scrolled = content.querySelector(".list")?.scrollTop || 0; // a rebuild must not jump the list back to the top
+      // The pill moving on to another item: the old text rolls up and out as the new rolls in.
+      const roll = m === "activity" && mode === "activity" && shownActKey && shownActKey !== rowKey(act) && content.firstElementChild;
+      const ghost = roll ? rollGhost() : null;
       content.innerHTML = html;
       shownHtml = html;
+      if (ghost) {
+        const face = content.firstElementChild;
+        face?.style.setProperty("--rh", ghost.style.getPropertyValue("--rh"));
+        face?.classList.add("roll-in");
+        content.parentElement.append(ghost);
+      }
       const list = content.querySelector(".list");
       if (list && scrolled) list.scrollTop = scrolled;
       wireNameInput(); // only for freshly built content, so listeners aren't stacked
@@ -301,10 +357,11 @@ function render() {
   if (isCompact && notch) {
     // Grow both wings (equally, so the gap stays over the notch) to fit the longer side.
     const need = Math.max(...[...content.querySelectorAll(".wing")].map(naturalWidth));
-    w = notchWidth + 2 * WING_PAD + 2 * Math.min(Math.max(need, WING_MIN), WING_MAX);
+    w = notchWidth + 2 * NOTCH_PAD + 2 * WING_PAD + 2 * Math.min(Math.max(need, WING_MIN), WING_MAX);
     setContentWidth(w);
   }
   if (h === undefined) h = content.offsetHeight;
+  shownActKey = m === "activity" ? rowKey(act) : "";
 
   if (m !== mode) {
     if (m !== "hidden") {
@@ -321,6 +378,22 @@ function render() {
     lastTarget = target;
     morph(from, m === "hidden");
   }
+}
+
+// A copy of what the pill shows now, laid over it, that slides up and fades while the next
+// event's text comes in underneath. It removes itself when done.
+function rollGhost() {
+  const w = content.offsetWidth;
+  const ghost = content.firstElementChild.cloneNode(true);
+  ghost.classList.remove("roll-in");
+  ghost.classList.add("roll-out");
+  ghost.style.width = `${w}px`;
+  ghost.style.marginLeft = `${-w / 2}px`;
+  ghost.style.setProperty("--rh", `${content.firstElementChild.offsetHeight}px`); // the cube's side
+  for (const v of ["--t", "--nw"]) ghost.style.setProperty(v, content.style.getPropertyValue(v));
+  ghost.addEventListener("animationend", () => ghost.remove());
+  setTimeout(() => ghost.remove(), 900); // reduced motion, or an animation that never ran
+  return ghost;
 }
 
 // ---------- the liquid morph ----------
@@ -360,7 +433,8 @@ function morph(from, closing) {
 
 const ROW_MIN = 300;  // the pill without a notch: at least this wide,
 const ROW_MAX = 560;  // and past this, the detail ends with "…"
-const WING_PAD = 12;  // matches .wings horizontal padding
+const WING_PAD = 16;  // matches .wings horizontal padding
+const NOTCH_PAD = 10; // clear space each side of the notch, matches .wings .gap
 const WING_MIN = 108; // the old fixed wing width
 const WING_MAX = 240; // past this, text ends with "…"
 

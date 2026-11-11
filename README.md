@@ -89,10 +89,11 @@ Teammates can see deployments, pull requests and issues from the Snap repositori
 
 - When it's on, you get a short notice in the island for each event, a red border when a deploy fails (not while you're on Busy), and an **Updates** tab with the recent ones.
 - Events come from GitHub Actions: `relay/status-relay.yml` runs on the DevOps laptop's self-hosted runner (label `lan-relay`) and hands each event to the Quick Call app on that laptop, which passes it to everyone on the office network. There's no server and no polling.
-- Each deploy, pull request and issue is one row that follows its lifecycle: "deploying…" becomes deployed, failed or cancelled (and "deploying…" again on a re-run); "opened" becomes merged or closed (and "opened" again on a reopen). The newest event wins, whatever order events arrive in.
+- Each deploy, pull request and issue is one row that follows its lifecycle: "deploying…" becomes deployed, failed or cancelled (and "deploying…" again on a re-run); "opened" becomes merged or closed (and "opened" again on a reopen); an issue becomes closed, or "not planned" when it was closed without being done. The newest event wins, whatever order events arrive in.
 - Each row names who wrote the change, by first name, never who merged it: a pull request shows its author, a deploy shows the authors of the commits it brought in (read with git from the commit history; no API calls). If that can't be read, no name is shown.
 - The status is never cut short; only the name and title after it end with "…". Click a row for its full detail; clicking another closes the first.
 - A deploy with no result after 30 minutes, or one that ended without a clear result, shows "not available". Rows older than 12 hours leave the list.
 - When that laptop is away, nothing is shown, and events older than 10 minutes are dropped rather than replayed. The one exception is a late event for a row already in the list: it corrects that row quietly, with no notice.
 - Apps compare their lists every few seconds. If you were asleep or off the network when a result was sent, a teammate's app passes it on when you're back.
 - Without a notch (other Macs, Windows) the notice grows to fit its text.
+- Several updates close together take turns in the notice: it stays open and each one turns up into the next like a cube (up to 10 wait; a failed deploy goes to the front; only the newest event of an item is shown).
