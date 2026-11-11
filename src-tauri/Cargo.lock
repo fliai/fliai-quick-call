@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "fliai-quick-call"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "mdns-sd",
  "objc2",
