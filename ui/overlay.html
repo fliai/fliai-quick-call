@@ -43,7 +43,12 @@
   <script>
     const call = window.__CALL__ || { name: "Someone", color: "#3b82f6" };
     document.documentElement.style.setProperty("--c", call.color);
-    document.getElementById("who").textContent = call.name;
+    if (call.banner) {
+      // A failed deploy (no caller): show the message itself instead of "<name> is calling...".
+      document.querySelector(".banner").textContent = call.banner;
+    } else {
+      document.getElementById("who").textContent = call.name;
+    }
 
     // Two strokes starting together at the top center, meeting at the bottom center.
     function edges() {
@@ -70,7 +75,12 @@
       }
       document.querySelector(".banner").animate([{ opacity: 0.92 }, { opacity: 0 }], { duration: 300, fill: "forwards" });
     }
-    window.__TAURI__?.event.listen("incoming-end", leave);
+    if (call.banner) {
+      // Retract only this flash's border, never a call's that replaced it.
+      window.__TAURI__?.event.listen("flash-end", (e) => { if (e.payload === call.gen) leave(); });
+    } else {
+      window.__TAURI__?.event.listen("incoming-end", leave);
+    }
   </script>
 </body>
 </html>

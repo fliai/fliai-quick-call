@@ -82,3 +82,11 @@ The bucket and domain are defined in [`infra/`](infra/README.md) (Terraform).
 - macOS asks for Local Network permission on first run. Windows Firewall asks to allow the app on private networks.
 - The app is ad-hoc signed, not signed with an Apple Developer ID. That's why the terminal install is recommended.
 - Anyone on the LAN can send a call, so it's meant for a trusted office network.
+
+## Deployment updates
+
+Teammates can see deployments, pull requests and issues from the Snap repositories in the island. Each person turns it on from the island's footer (**Deployment updates**). It's off by default.
+
+- When it's on, you get a short notice in the island for each event, a red border when a deploy fails (not while you're on Busy), and an **Updates** tab with the recent ones.
+- Events come from GitHub Actions: `relay/status-relay.yml` runs on the DevOps laptop's self-hosted runner (label `lan-relay`) and hands each event to the Quick Call app on that laptop, which passes it to everyone on the office network. There's no server and no polling.
+- When that laptop is away, nothing is shown, and events older than 10 minutes are dropped rather than replayed.

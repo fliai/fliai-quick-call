@@ -212,3 +212,98 @@ button.x { width: 24px; height: 24px; padding: 0; display: grid; place-items: ce
 .incoming .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .incoming .actions { display: flex; gap: 8px; }
 .incoming .actions button { flex: 1; padding: 9px; font-size: 14px; }
+
+/* ---------- deployment / GitHub activity ---------- */
+
+.icon.act { color: #fff; }
+.icon.act.started { background: transparent; border: 2px solid #ffd60a; border-top-color: transparent; animation: spin 0.9s linear infinite; }
+.icon.act.success, .icon.act.pr-merged { background: var(--green); color: #00230b; }
+.icon.act.failure { background: var(--red); }
+.icon.act.cancelled, .icon.act.pr-closed { background: var(--grey); }
+.icon.act.pr-opened { background: #bf5af2; }
+.icon.act.issue-opened { background: var(--blue); }
+
+.act-row { display: flex; align-items: center; gap: 8px; padding: 4px; font-size: 12px; }
+.act-row .icon { width: 18px; height: 18px; font-size: 10px; }
+.act-row .ellipsis { flex: 1; color: var(--muted); }
+.act-row b { color: var(--text); font-weight: 600; }
+.act-row .when { color: var(--grey); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* ---------- compact open island: header, tabs, footer switch ---------- */
+
+/* Three fixed columns: the name stays centred whatever the switch beside it shows. */
+.head { display: grid; grid-template-columns: 1fr minmax(0, auto) 1fr; align-items: center; gap: 8px; margin-bottom: 8px; }
+.head .hl { justify-self: start; min-width: 0; }
+.head .hc { justify-self: center; min-width: 0; max-width: 190px; display: flex; align-items: center; gap: 2px; color: var(--muted); font-size: 12px; }
+.head .hc .pen { flex: none; padding: 2px 5px; }
+.head .hc input { width: 150px; font: inherit; color: var(--text); background: rgba(255, 255, 255, 0.1); border: 1px solid var(--line); border-radius: 8px; padding: 3px 8px; outline: none; }
+.head .hr { justify-self: end; display: flex; align-items: center; }
+.head .hr .refresh { display: grid; place-items: center; padding: 4px 6px; }
+.head .hr .refresh.spin svg { animation: spin 0.6s linear 2; }
+
+.tabs { display: flex; gap: 4px; padding: 3px; background: rgba(255, 255, 255, 0.08); border-radius: 999px; margin-bottom: 6px; }
+.tabs button { flex: 1; background: transparent; padding: 5px 10px; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.tabs button.on { background: rgba(255, 255, 255, 0.18); font-weight: 600; }
+.tabs .n { color: var(--muted); font-weight: 400; }
+.tabs .badge { min-width: 16px; height: 16px; padding: 0 5px; border-radius: 999px; background: var(--red); color: #fff; font-size: 10px; font-weight: 700; display: inline-grid; place-items: center; }
+
+.list { max-height: 228px; }
+.foot .toggle { justify-self: start; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; background: transparent; padding: 3px 4px; }
+.foot .toggle:hover { background: rgba(255, 255, 255, 0.06); }
+.sw { display: inline-block; }
+.sw { width: 26px; height: 15px; padding: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.18); position: relative; flex: none; }
+.sw i { position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: #fff; transition: left 0.15s ease; }
+.sw.on { background: var(--green); }
+.sw.on i { left: 13px; }
+.sw:hover { background: rgba(255, 255, 255, 0.26); }
+.sw.on:hover { background: var(--green); }
+
+/* Availability button: always shows its colour and word; a click swaps Available / Busy. */
+.avail { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 8px; font-size: 12px; font-weight: 600; }
+.avail.available { background: rgba(48, 209, 88, 0.16); color: var(--green); }
+.avail.available:hover { background: rgba(48, 209, 88, 0.26); }
+.avail.busy { background: rgba(255, 69, 58, 0.16); color: var(--red); }
+.avail.busy:hover { background: rgba(255, 69, 58, 0.26); }
+.avail .dot { width: 8px; height: 8px; }
+
+/* Footer on one line: switch + label left, version and Quit right (never wraps). */
+.foot { display: flex; align-items: center; gap: 6px; }
+.foot .toggle { white-space: nowrap; flex: none; }
+.foot .ver { margin-left: auto; white-space: nowrap; }
+.foot .ver .upd { margin-left: 6px; }
+.foot > button.ghost:last-child { flex: none; padding: 3px 6px; }
+
+/* Lists scroll by wheel / trackpad without drawing a scrollbar (macOS and Windows). */
+.list { overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none; }
+.list::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
+/* Header: equal fixed side columns (wide enough for the status button), so the button never
+   covers the name and the name stays centred; a long name ends with "…". */
+.head { grid-template-columns: 92px minmax(0, 1fr) 92px; gap: 6px; }
+.head .hl, .head .hr { min-width: 0; }
+.head .hc { max-width: 100%; justify-self: center; }
+.head .hc .ellipsis { min-width: 0; }
+.head .avail { padding: 4px 9px 4px 7px; font-size: 11.5px; max-width: 92px; }
+.head { grid-template-columns: 84px minmax(0, 1fr) 84px; gap: 4px; }
+.head .avail { padding: 4px 8px 4px 6px; font-size: 11.5px; gap: 5px; max-width: 84px; }
+.head .hc b { color: var(--text); font-weight: 600; }
+/* Right column only as wide as the refresh button; left stays fixed so Available/Busy never
+   moves the name, which is centred in all the space between them. */
+.head { grid-template-columns: 84px minmax(0, 1fr) auto; }
+
+/* Name: centred on the island while it fits; a longer name grows to the right (into the space
+   before refresh) before it ends with "…". The middle column starts 88px from the left
+   (84px column + 4px gap) but ends only 30px from the right (26px refresh + 4px gap), so the
+   right spacer starts 58px wider: that keeps the name on the island's centre line, and it is
+   the first thing to give way when the name needs more room. */
+.head { grid-template-columns: 84px minmax(0, 1fr) auto; gap: 4px; }
+.head .hc { justify-self: stretch; width: 100%; max-width: none; display: flex; align-items: center; }
+.head .hc::before { content: ""; flex: 1 0 0; }
+.head .hc::after { content: ""; flex: 1 1 58px; }
+.head .hc .nm { flex: 0 0 auto; max-width: 100%; min-width: 0; display: flex; align-items: center; gap: 2px; }
+.head .hc .nm .ellipsis { min-width: 0; }
+.head .hr .refresh { width: 26px; padding: 4px 0; }
+/* The name stops 10px short of refresh: the right spacer never shrinks below that, and nothing
+   inside the middle column can spill past it. */
+.head .hc { min-width: 0; overflow: hidden; }
+.head .hc::after { min-width: 10px; }

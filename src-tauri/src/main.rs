@@ -26,6 +26,12 @@ const REBROWSE_EVERY: Duration = Duration::from_secs(120);
 const HOVER_OPEN_AFTER: Duration = Duration::from_millis(120);
 const HOVER_CLOSE_AFTER: Duration = Duration::from_millis(300);
 const NET_TIMEOUT: Duration = Duration::from_millis(1500);
+// A call waits longer for its answer than the quick status checks: the callee may be slow to answer.
+const CALL_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+// Deployment / GitHub activity pushed by the DevOps relay (see .github/status-relay.yml).
+const ACTIVITY_KEEP: usize = 20; // recent events kept for the open island
+const ACTIVITY_MAX_AGE_SECS: u64 = 10 * 60; // older events are dropped, never replayed
+const FLASH_FOR: Duration = Duration::from_secs(6); // red border on a failed deploy
 
 // ---------- state ----------
 
@@ -34,6 +40,9 @@ struct Me {
     id: String,
     name: String,
     status: String, // "available" | "busy"
+    /// "Deployment updates": show deploy / PR / issue activity. Off until the person turns it on.
+    #[serde(default)]
+    activity: bool,
 }
 
 struct Peer {
@@ -50,6 +59,25 @@ struct Incoming {
     reply_to: SocketAddr,
 }
 
+/// One deployment, pull request or issue event. Published on the relay's own machine by a
+/// GitHub Actions job (loopback only), then pushed to every peer on the LAN.
+#[derive(Serialize, Deserialize, Clone)]
+struct Activity {
+    id: String,    // unique per event, used to drop duplicates
+    repo: String,  // e.g. "snap-core"
+    kind: String,  // "deploy" | "pr" | "issue"
+    state: String, // deploy: "started" | "success" | "failure" | "cancelled"; pr: "opened" | "merged" | "closed"; issue: "opened"
+    #[serde(default)]
+    env: String, // deploy: "staging" | "production"
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    number: u64,
+    #[serde(default)]
+    actor: String,
+    at: u64, // unix seconds when it happened
+}
+
 struct State {
     me: Me,
     port: u16,
@@ -58,6 +86,7 @@ struct State {
     incoming: Option<Incoming>,
     outgoing: Option<String>, // peer id we are calling
     next_call_id: u64,
+    activity: Vec<Activity>, // newest first
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -109,6 +138,7 @@ struct PeerView {
 struct StateView {
     me: Me,
     peers: Vec<PeerView>,
+    activity: Vec<Activity>,
 }
 
 fn view(s: &State) -> StateView {
@@ -127,7 +157,7 @@ fn view(s: &State) -> StateView {
         })
         .collect();
     peers.sort_by(|a, b| rank(&a.status).cmp(&rank(&b.status)).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
-    StateView { me: s.me.clone(), peers }
+    StateView { me: s.me.clone(), peers, activity: s.activity.clone() }
 }
 
 fn push_state(app: &AppHandle, shared: &Shared) {
@@ -161,6 +191,7 @@ fn load_config(path: &PathBuf) -> Me {
         id: format!("{:x}{:x}", nanos, std::process::id()),
         name: name.into_iter().collect(),
         status: "available".into(),
+        activity: false,
     }
 }
 
@@ -183,11 +214,19 @@ enum Msg {
     Call { id: String, name: String, port: u16 },
     Cancel { id: String },
     Reply { id: String, name: String, answer: String },
+    /// From the relay job on this same machine only: show it here and push it to every peer.
+    Publish { ev: Activity },
+    /// From a peer: an activity event to show.
+    Status { ev: Activity },
 }
 
 fn send(addr: SocketAddr, msg: &Msg) -> std::io::Result<Value> {
+    send_with(addr, msg, NET_TIMEOUT)
+}
+
+fn send_with(addr: SocketAddr, msg: &Msg, reply_timeout: Duration) -> std::io::Result<Value> {
     let mut stream = TcpStream::connect_timeout(&addr, NET_TIMEOUT)?;
-    stream.set_read_timeout(Some(NET_TIMEOUT))?;
+    stream.set_read_timeout(Some(reply_timeout))?;
     stream.set_write_timeout(Some(NET_TIMEOUT))?;
     stream.write_all(format!("{}\n", serde_json::to_string(msg).unwrap()).as_bytes())?;
     let mut line = String::new();
@@ -276,7 +315,11 @@ fn handle_conn(app: AppHandle, shared: Shared, mut stream: TcpStream) {
             // Busy means do not disturb: no alert at all, the caller is told straight away.
             let status = shared.lock().unwrap().me.status.clone();
             if status != "busy" {
-                on_incoming_call(&app, &shared, clean(&id, 64), clean(&name, 40), SocketAddr::new(ip, port));
+                // Answer the caller first; opening the border windows can take seconds (several
+                // monitors, Windows), and a slow answer made the caller think the call failed.
+                let (app, shared, reply_to) = (app.clone(), shared.clone(), SocketAddr::new(ip, port));
+                let (id, name) = (clean(&id, 64), clean(&name, 40));
+                thread::spawn(move || on_incoming_call(&app, &shared, id, name, reply_to));
             }
             json!({ "status": status })
         }
@@ -301,8 +344,97 @@ fn handle_conn(app: AppHandle, shared: Shared, mut stream: TcpStream) {
             }
             json!({})
         }
+        Msg::Publish { ev } => {
+            // Only a job running on this machine may publish; peers can't make us rebroadcast.
+            if !ip.is_loopback() {
+                json!({ "error": "local only" })
+            } else {
+                match accept_activity(&app, &shared, ev) {
+                    Some(ev) => json!({ "sent": broadcast_activity(&shared, &ev) }),
+                    None => json!({ "skipped": true }),
+                }
+            }
+        }
+        Msg::Status { ev } => {
+            accept_activity(&app, &shared, ev);
+            json!({})
+        }
     };
     let _ = stream.write_all(format!("{reply}\n").as_bytes());
+}
+
+// ---------- deployment / GitHub activity ----------
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Clean an incoming event, drop it if it's stale, unknown or already seen, then store and show it.
+/// Returns the stored event so the relay can pass it on.
+fn accept_activity(app: &AppHandle, shared: &Shared, ev: Activity) -> Option<Activity> {
+    let ev = Activity {
+        id: clean(&ev.id, 120),
+        repo: clean(&ev.repo, 40),
+        kind: clean(&ev.kind, 10),
+        state: clean(&ev.state, 12),
+        env: clean(&ev.env, 12),
+        title: clean(&ev.title, 120),
+        number: ev.number,
+        actor: clean(&ev.actor, 40),
+        at: ev.at,
+    };
+    let now = now_secs();
+    let known = matches!(
+        (ev.kind.as_str(), ev.state.as_str()),
+        ("deploy", "started" | "success" | "failure" | "cancelled") | ("pr", "opened" | "merged" | "closed") | ("issue", "opened")
+    );
+    if !known || ev.id.is_empty() || ev.repo.is_empty() || ev.at + ACTIVITY_MAX_AGE_SECS < now || ev.at > now + 120 {
+        return None;
+    }
+    let (busy, wanted) = {
+        let mut s = shared.lock().unwrap();
+        if s.activity.iter().any(|a| a.id == ev.id) {
+            return None;
+        }
+        s.activity.insert(0, ev.clone());
+        s.activity.truncate(ACTIVITY_KEEP);
+        (s.me.status == "busy", s.me.activity)
+    };
+    push_state(app, shared);
+    if !wanted {
+        return Some(ev); // kept quietly (the relay still passes it on); nothing is shown
+    }
+    let _ = app.emit("activity", ev.clone());
+    // A failed deploy flashes a red border, like a call, unless they're on Busy (do not disturb).
+    if ev.kind == "deploy" && ev.state == "failure" && !busy {
+        let short = ev.repo.trim_start_matches("snap-").to_string();
+        flash(app, &format!("{short} → {} deploy failed", if ev.env.is_empty() { "?" } else { &ev.env }));
+    }
+    Some(ev)
+}
+
+/// Push an event to every peer that's online. Returns how many were reached.
+fn broadcast_activity(shared: &Shared, ev: &Activity) -> usize {
+    let addrs: Vec<SocketAddr> = shared.lock().unwrap().peers.values().filter(|p| p.online).map(|p| p.addr).collect();
+    let msg = Msg::Status { ev: ev.clone() };
+    thread::scope(|sc| {
+        let handles: Vec<_> = addrs.into_iter().map(|a| { let msg = &msg; sc.spawn(move || send(a, msg).is_ok()) }).collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).filter(|ok| *ok).count()
+    })
+}
+
+/// Show the red border with a banner for a few seconds, then retract it.
+fn flash(app: &AppHandle, text: &str) {
+    if app.state::<Shared>().lock().unwrap().incoming.is_some() {
+        return; // never cover an incoming call
+    }
+    let generation = show_overlays(app, "", "#ff453a", Some(text));
+    let app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(FLASH_FOR);
+        let _ = app.emit("flash-end", generation);
+        close_overlays_soon(&app, generation);
+    });
 }
 
 // ---------- calls ----------
@@ -317,7 +449,7 @@ fn on_incoming_call(app: &AppHandle, shared: &Shared, from_id: String, from_name
         s.next_call_id
     };
     hide_overlays(app);
-    show_overlays(app, &name, &color);
+    show_overlays(app, &name, &color, None);
     let _ = app.emit("incoming", json!({ "name": name, "color": color }));
 
     // Ring while unanswered; give up after the timeout.
@@ -383,10 +515,10 @@ fn play_sound() {
 static OVERLAY_GEN: AtomicU64 = AtomicU64::new(0);
 const OVERLAY_EXIT: Duration = Duration::from_millis(800); // a little over overlay.html's retract
 
-fn show_overlays(app: &AppHandle, name: &str, color: &str) {
+fn show_overlays(app: &AppHandle, name: &str, color: &str, banner: Option<&str>) -> u64 {
     let generation = OVERLAY_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let Ok(monitors) = app.available_monitors() else { return };
-    let data = json!({ "name": name, "color": color });
+    let Ok(monitors) = app.available_monitors() else { return generation };
+    let data = json!({ "name": name, "color": color, "banner": banner, "gen": generation });
     for (i, m) in monitors.iter().enumerate() {
         let scale = m.scale_factor();
         let (pos, size) = (m.position(), m.size());
@@ -414,6 +546,7 @@ fn show_overlays(app: &AppHandle, name: &str, color: &str) {
         let _ = pill.set_always_on_top(false);
         let _ = pill.set_always_on_top(true);
     }
+    generation
 }
 
 // macOS window levels: above the menu bar and over full-screen apps.
@@ -458,7 +591,12 @@ fn detect_notch() -> Screen {
 
 /// Close the current call's overlays once their border has retracted.
 fn hide_overlays_soon(app: &AppHandle) {
-    let prefix = format!("overlay-{}-", OVERLAY_GEN.load(Ordering::SeqCst));
+    close_overlays_soon(app, OVERLAY_GEN.load(Ordering::SeqCst));
+}
+
+/// Close one generation's overlays once their border has retracted.
+fn close_overlays_soon(app: &AppHandle, generation: u64) {
+    let prefix = format!("overlay-{generation}-");
     let app = app.clone();
     thread::spawn(move || {
         thread::sleep(OVERLAY_EXIT);
@@ -597,6 +735,16 @@ fn set_name(app: AppHandle, shared: tauri::State<Shared>, name: String) {
 }
 
 #[tauri::command]
+fn set_activity(app: AppHandle, shared: tauri::State<Shared>, on: bool) {
+    {
+        let mut s = shared.lock().unwrap();
+        s.me.activity = on;
+        save_config(&s);
+    }
+    push_state(&app, &shared);
+}
+
+#[tauri::command]
 fn call_peer(app: AppHandle, shared: tauri::State<Shared>, id: String) {
     let shared = shared.inner().clone();
     thread::spawn(move || {
@@ -605,7 +753,7 @@ fn call_peer(app: AppHandle, shared: tauri::State<Shared>, id: String) {
             let Some(p) = s.peers.get(&id) else { return };
             (p.addr, p.name.clone(), Msg::Call { id: s.me.id.clone(), name: s.me.name.clone(), port: s.port })
         };
-        match send(addr, &msg) {
+        match send_with(addr, &msg, CALL_REPLY_TIMEOUT) {
             Ok(resp) => {
                 let their = resp.get("status").and_then(Value::as_str).unwrap_or("available").to_string();
                 if their == "busy" {
@@ -888,7 +1036,7 @@ fn main() {
     }
     builder
         .invoke_handler(tauri::generate_handler![
-            get_state, get_screen, set_status, set_name, call_peer, cancel_call, answer, resize, focus_island, refresh, quit
+            get_state, get_screen, set_status, set_name, set_activity, call_peer, cancel_call, answer, resize, focus_island, refresh, quit
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -918,6 +1066,7 @@ fn main() {
                 incoming: None,
                 outgoing: None,
                 next_call_id: 0,
+                activity: Vec::new(),
             }));
             save_config(&shared.lock().unwrap());
             app.manage(shared.clone());

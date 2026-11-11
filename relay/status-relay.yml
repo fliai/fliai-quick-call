@@ -1,0 +1,92 @@
+# FLiAI Quick Call: deployment, pull request and issue status for the office.
+#
+# Runs only on the DevOps laptop's self-hosted runner (label `lan-relay`). It hands each event
+# to the Quick Call app on that laptop (127.0.0.1), which pushes it to every teammate on the
+# office LAN. No cloud service, no polling, no quota. When the laptop is away, nothing is sent:
+# events older than 10 minutes are skipped, never replayed.
+#
+# Security: workflow_run, pull_request_target and issues always run this file from the default
+# branch, and the job never checks out code, so a pull request can't run its own commands here.
+# Titles reach the script through env vars only, never through ${{ }} inside `run`.
+name: status-relay
+
+on:
+  workflow_run:
+    workflows: [deploy, CI/CD] # the deploy workflow's name in each repo
+    types: [requested, completed]
+  pull_request_target:
+    types: [opened, closed]
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  relay:
+    # Deploys only: workflow runs started by a push to staging or main (PR check runs are skipped).
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.event == 'push' }}
+    # Only label on the DevOps laptop's runner (registered with --no-default-labels), so no other
+    # job (they ask for `self-hosted`) ever lands on the laptop, and this job lands nowhere else.
+    runs-on: [lan-relay]
+    timeout-minutes: 2
+    steps:
+      - name: Send to Quick Call
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          REPO: ${{ github.event.repository.name }}
+          ACTOR: ${{ github.event.sender.login }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_AT: ${{ github.event.workflow_run.updated_at }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_AT: ${{ github.event.pull_request.updated_at }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_AT: ${{ github.event.issue.created_at }}
+        run: |
+          python3 -I - <<'PY'
+          import datetime, json, os, socket, sys, time
+          e = lambda k: os.environ.get(k, "")
+          def ts(s):
+              try:
+                  return int(datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+              except ValueError:
+                  return int(time.time())
+          def skip(why):
+              print(f"skipped: {why}")
+              sys.exit(0)
+
+          if e("EVENT") == "workflow_run":
+              env = {"staging": "staging", "main": "production"}.get(e("RUN_BRANCH"))
+              if not env:
+                  skip(f"branch {e('RUN_BRANCH')} is not a deploy branch")
+              if e("ACTION") == "requested":
+                  state = "started"
+              else:
+                  state = {"success": "success", "failure": "failure", "timed_out": "failure", "cancelled": "cancelled"}.get(e("RUN_CONCLUSION"))
+              if not state:
+                  skip(f"conclusion {e('RUN_CONCLUSION')}")
+              ev = dict(id=f"{e('REPO')}:run:{e('RUN_ID')}:{state}", kind="deploy", state=state, env=env, number=0, title="", at=ts(e("RUN_AT")))
+          elif e("EVENT") == "pull_request_target":
+              state = "opened" if e("ACTION") == "opened" else ("merged" if e("PR_MERGED") == "true" else "closed")
+              ev = dict(id=f"{e('REPO')}:pr:{e('PR_NUMBER')}:{state}", kind="pr", state=state, env="", number=int(e("PR_NUMBER") or 0), title=e("PR_TITLE"), at=ts(e("PR_AT")))
+          elif e("EVENT") == "issues":
+              ev = dict(id=f"{e('REPO')}:issue:{e('ISSUE_NUMBER')}:opened", kind="issue", state="opened", env="", number=int(e("ISSUE_NUMBER") or 0), title=e("ISSUE_TITLE"), at=ts(e("ISSUE_AT")))
+          else:
+              skip(f"event {e('EVENT')}")
+          ev.update(repo=e("REPO"), actor=e("ACTOR"))
+
+          if time.time() - ev["at"] > 600:
+              skip("older than 10 minutes (laptop was away)")
+          try:
+              with socket.create_connection(("127.0.0.1", 47800), timeout=3) as s:
+                  s.sendall((json.dumps({"t": "publish", "ev": ev}) + "\n").encode())
+                  print("sent:", ev["id"], s.recv(4096).decode().strip())
+          except OSError as err:
+              skip(f"Quick Call not reachable on this machine ({err})")
+          PY
