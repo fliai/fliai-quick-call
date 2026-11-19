@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "fliai-quick-call"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "gtk",
  "mdns-sd",
