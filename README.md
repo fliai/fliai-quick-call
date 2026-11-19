@@ -4,7 +4,7 @@ Tap a teammate on the shoulder when they're wearing headphones. You click their 
 
 - It lives in a Dynamic Island at the top center of the screen. On MacBooks with a notch it hides inside the notch. Everywhere else it's a "liquid" island that melts out of the top edge. Move the mouse to the top center to open it.
 - Each person sets their own status: 🟢 Available / 🔴 Busy. ⚪ Offline is automatic.
-- Busy means do not disturb. You can't call a Busy person, and if a call arrives anyway they see nothing and the caller gets "Busy".
+- Busy means do not disturb, and it's always for a set time: 30 min, 1 hour or until tomorrow (8:00). It goes back to Available on its own, and teammates see how long is left. While Busy, the island shows a countdown ring ("Team members" shows the list). You can't call a Busy person, and if a call arrives anyway they see nothing and the caller gets "Busy".
 - Replies are **Accept** or **Busy**. An unanswered call times out after 30 s.
 - No server. Peers find each other with mDNS (Bonjour) on the office network and talk directly over TCP (port 47800).
 
@@ -22,17 +22,27 @@ Windows (PowerShell):
 irm https://cdn-quickcall.fliai.lk/install.ps1 | iex
 ```
 
-To update, run the same command, or `update.sh` / `update.ps1`. It checks the installed version: if it's current it says "already up to date", otherwise it closes the app, replaces it and reopens it. Settings are kept.
+Linux, Ubuntu 24.04 or newer on x86_64 (Terminal), same command as Mac:
+
+```sh
+curl -fsSL https://cdn-quickcall.fliai.lk/install.sh | sh
+```
+
+It installs into `~/.local/share/fliai-quick-call` (no sudo) and adds an apps-menu entry. It needs the WebKitGTK web view (`libwebkit2gtk-4.1-0`), already on most Ubuntu desktops; if it's missing, the installer prints the `apt` command. On Linux the app runs through XWayland so it can sit at the top of the screen; the island opens when the pointer reaches it, just under GNOME's top bar.
+
+**Updates install themselves.** About every 6 hours (and on refresh) the app checks for a newer version. When there is one it waits until no call is going and the island is closed, shows "Updating to v…", runs the update script in the background and reopens. The **Update** button next to the version does it right away. If an update fails midway, the installed version is reopened. (Microsoft Store installs update through the Store.)
+
+You can still update by hand: run the same command, or `update.sh` / `update.ps1`. It checks the installed version: if it's current it says "already up to date", otherwise it closes the app, replaces it and reopens it. Settings are kept.
 
 Installing from the terminal skips the macOS "unverified developer" and Windows SmartScreen warnings. The `.dmg` and `-setup.exe` can also be downloaded directly from `https://cdn-quickcall.fliai.lk/`, but then the first open needs System Settings → Privacy & Security → **Open Anyway** (Mac), or **More info → Run anyway** (Windows).
 
 Mac builds are universal (Apple Silicon + Intel).
 
-The app starts by itself when you log in (Mac: a Launch Agent that also restarts it if it crashes or is force-quit; Windows: a sign-in entry). Quitting from the island keeps it closed until the next login.
+The app starts by itself when you log in (Mac: a Launch Agent that also restarts it if it crashes or is force-quit; Windows: a sign-in entry; Linux: a desktop autostart entry). Quitting from the island keeps it closed until the next login.
 
 ## Uninstall
 
-Mac (Terminal):
+Mac or Linux (Terminal):
 
 ```sh
 curl -fsSL https://cdn-quickcall.fliai.lk/uninstall.sh | sh
