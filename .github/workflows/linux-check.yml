@@ -45,11 +45,16 @@ jobs:
       # Hover the island: its window must grow to the full open island, then shrink after leaving.
       - name: Hover opens the full island, leaving closes it
         run: |
-          sudo apt-get install -y xdotool
+          sudo apt-get install -y xdotool x11-utils
           xvfb-run -a -s "-screen 0 1440x900x24" sh -ec '
             ./src-tauri/target/release/fliai-quick-call > app.log 2>&1 &
             sleep 8
-            win=$(xdotool search --onlyvisible --pid $! | tail -1)
+            xwininfo -root -tree | grep -i "quick\|fliai" || true
+            win=""
+            for w in $(xdotool search --name "Quick Call"; xdotool search --class "fliai"); do
+              xwininfo -id "$w" | grep -q IsViewable && win=$w
+            done
+            [ -n "$win" ] || { echo "No island window found."; cat app.log; exit 1; }
             size() { eval "$(xdotool getwindowgeometry --shell "$win")"; echo "$1: ${WIDTH}x${HEIGHT}"; }
             size closed
             xdotool mousemove 720 3; sleep 0.3; xdotool mousemove 721 4
