@@ -798,6 +798,30 @@ fn place_island(app: &AppHandle, width: f64, height: f64, interactive: bool) {
     };
 }
 
+/// Linux: pass the window's own pointer enter/leave (X11 crossing events) to the UI. WebKitGTK
+/// often drops the DOM mouseleave, and these also fire when the window shrinks out from under
+/// a still pointer. Crossings into the webview inside the window are ignored.
+#[cfg(target_os = "linux")]
+fn start_linux_hover(app: &AppHandle) {
+    use gtk::{gdk, glib, prelude::*};
+    let Some(pill) = app.get_webview_window("pill") else { return };
+    let Ok(win) = pill.gtk_window() else { return };
+    win.add_events(gdk::EventMask::ENTER_NOTIFY_MASK | gdk::EventMask::LEAVE_NOTIFY_MASK);
+    let (on_enter, on_leave) = (app.clone(), app.clone());
+    win.connect_enter_notify_event(move |_, e| {
+        if e.detail() != gdk::NotifyType::Inferior {
+            let _ = on_enter.emit("pointer", true);
+        }
+        glib::Propagation::Proceed
+    });
+    win.connect_leave_notify_event(move |_, e| {
+        if e.detail() != gdk::NotifyType::Inferior {
+            let _ = on_leave.emit("pointer", false);
+        }
+        glib::Propagation::Proceed
+    });
+}
+
 /// Tell the UI when the mouse reaches the top-center hot zone, or leaves the open island.
 /// Also makes the window clickable only while the cursor is over an interactive island, so the
 /// rest of the (transparent) window never blocks clicks to apps underneath.
@@ -1411,7 +1435,10 @@ fn main() {
             #[cfg(not(target_os = "linux"))]
             start_hover_watch(handle, geo);
             #[cfg(target_os = "linux")]
-            let _ = geo;
+            {
+                let _ = geo;
+                start_linux_hover(&handle);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

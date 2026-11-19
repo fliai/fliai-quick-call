@@ -558,7 +558,8 @@ function setLinuxWindow(w, h, interactive) {
 }
 
 // Linux: hover is the pointer entering or leaving the window itself, with the same short delays
-// the other platforms use.
+// the other platforms use. The app's window events are the reliable source; the DOM ones are a
+// backup.
 function linuxHover() {
   let timer = null;
   const set = (on, ms) => {
@@ -573,6 +574,7 @@ function linuxHover() {
   };
   document.documentElement.addEventListener("mouseenter", () => set(true, 120));
   document.documentElement.addEventListener("mouseleave", () => set(false, 300));
+  listen("pointer", (e) => set(e.payload, e.payload ? 120 : 300));
 }
 
 function wireNameInput() {

@@ -979,6 +979,7 @@ dependencies = [
 name = "fliai-quick-call"
 version = "0.1.12"
 dependencies = [
+ "gtk",
  "mdns-sd",
  "objc2",
  "objc2-app-kit",

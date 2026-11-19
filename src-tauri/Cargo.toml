@@ -24,6 +24,10 @@ panic = "abort"
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 tauri-plugin-autostart = "2.7.0"
 
+# Linux hover: the window's own pointer enter/leave events (same gtk as Tauri uses).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media_Audio"] }
 
