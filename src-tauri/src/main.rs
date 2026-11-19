@@ -758,7 +758,16 @@ fn place_island(app: &AppHandle, width: f64, height: f64, interactive: bool) {
         let geo = app.state::<SharedGeo>();
         let mut g = geo.lock().unwrap();
         if !g.placed || g.w != width || g.h != height {
-            let _ = pill.set_size(LogicalSize::new(width, height));
+            // GTK ignores a plain resize on a non-resizable window (it sticks to its size
+            // request), so set the request itself, on the main thread.
+            let win = pill.clone();
+            let _ = pill.run_on_main_thread(move || {
+                use gtk::prelude::*;
+                if let Ok(gw) = win.gtk_window() {
+                    gw.set_size_request(width.round() as i32, height.round() as i32);
+                    gw.resize(width.round() as i32, height.round() as i32);
+                }
+            });
         }
         if !g.placed || g.win_x != win_x || g.win_y != win_y {
             let _ = pill.set_position(LogicalPosition::new(win_x, win_y));
