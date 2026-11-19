@@ -41,3 +41,21 @@ jobs:
             sleep 10
             if pgrep -f target/release/fliai-quick-call >/dev/null; then echo "App is running."; else echo "App exited:"; cat app.log; exit 1; fi
           '
+
+      # Hover the island: its window must grow to the full open island, then shrink after leaving.
+      - name: Hover opens the full island, leaving closes it
+        run: |
+          sudo apt-get install -y xdotool
+          xvfb-run -a -s "-screen 0 1440x900x24" sh -ec '
+            ./src-tauri/target/release/fliai-quick-call > app.log 2>&1 &
+            sleep 8
+            win=$(xdotool search --onlyvisible --pid $! | tail -1)
+            size() { eval "$(xdotool getwindowgeometry --shell "$win")"; echo "$1: ${WIDTH}x${HEIGHT}"; }
+            size closed
+            xdotool mousemove 720 3; sleep 0.3; xdotool mousemove 721 4
+            sleep 3; size open
+            [ "$HEIGHT" -ge 150 ] || { echo "Open island is cropped."; cat app.log; exit 1; }
+            xdotool mousemove 720 700
+            sleep 3; size "after leaving"
+            [ "$HEIGHT" -le 40 ] || { echo "Island did not close."; exit 1; }
+          '
