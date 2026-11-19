@@ -23,7 +23,10 @@ const POLL_EVERY: Duration = Duration::from_secs(3);
 const REBROWSE_EVERY: Duration = Duration::from_secs(120);
 // How long the cursor must rest in (or stay away from) the top-center hot zone before the island
 // opens (or closes). Short, so it feels immediate; just enough to ignore a cursor passing by.
+// (Linux has no global cursor: there the UI handles hover itself, with the same delays.)
+#[cfg(not(target_os = "linux"))]
 const HOVER_OPEN_AFTER: Duration = Duration::from_millis(120);
+#[cfg(not(target_os = "linux"))]
 const HOVER_CLOSE_AFTER: Duration = Duration::from_millis(300);
 const NET_TIMEOUT: Duration = Duration::from_millis(1500);
 // A call waits longer for its answer than the quick status checks: the callee may be slow to answer.
@@ -102,7 +105,9 @@ struct State {
 type Shared = Arc<Mutex<State>>;
 
 /// Where the island window currently sits, in logical pixels, plus its hover hot zone.
+/// (The position and hot zone are read by the hover watcher, which Linux doesn't use.)
 #[derive(Default, Clone, Copy)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 struct Geo {
     // The island's visible rectangle (it sits inside a larger, fixed, transparent window).
     x: f64,
@@ -796,6 +801,7 @@ fn place_island(app: &AppHandle, width: f64, height: f64, interactive: bool) {
 /// Tell the UI when the mouse reaches the top-center hot zone, or leaves the open island.
 /// Also makes the window clickable only while the cursor is over an interactive island, so the
 /// rest of the (transparent) window never blocks clicks to apps underneath.
+#[cfg(not(target_os = "linux"))]
 fn start_hover_watch(app: AppHandle, geo: SharedGeo) {
     thread::spawn(move || {
         let (mut inside, mut raw_was, mut since) = (false, false, Instant::now());
