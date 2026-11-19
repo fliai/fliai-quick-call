@@ -1,9 +1,8 @@
 name: Linux check
 
-# Build the Linux app on any branch other than main and check it starts, before releasing.
+# Build the Linux app and check it starts. Manual only (Actions tab > Linux check > Run workflow);
+# it takes ~10 minutes, so it never runs on push.
 on:
-  push:
-    branches-ignore: [main]
   workflow_dispatch:
 
 permissions:
