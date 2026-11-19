@@ -46,12 +46,14 @@ jobs:
       - name: Hover opens the full island, leaving closes it
         run: |
           sudo apt-get install -y xdotool x11-utils
+          pkill -f target/release/fliai-quick-call || true  # the start check's copy (single instance)
+          sleep 1
           xvfb-run -a -s "-screen 0 1440x900x24" sh -ec '
             ./src-tauri/target/release/fliai-quick-call > app.log 2>&1 &
             sleep 8
             xwininfo -root -tree | head -30
             win=""
-            for w in $(xdotool search --onlyvisible --name "" 2>/dev/null); do
+            for w in $(xdotool search --onlyvisible --class "fliai" 2>/dev/null); do
               xwininfo -id "$w" | grep -q IsViewable && [ "$(xwininfo -id "$w" | awk "/Width:/{print \$2}")" -gt 50 ] && win=$w
             done
             [ -n "$win" ] || { echo "No island window found."; cat app.log; exit 1; }
