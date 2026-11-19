@@ -27,6 +27,76 @@ let mode = null;
 let refreshing = false;
 let version = "";
 let latest = ""; // set when a newer version is out
+let busyMenu = false; // the "Busy for…" choices are showing
+let busyPeople = false; // while Busy: showing the team list instead of the countdown (until the island hides)
+
+// Busy always ends: 30 min, 1 hour, or tomorrow at 8:00 (or this morning, if it's still night).
+function busyUntil(choice) {
+  const now = new Date();
+  if (choice === "30") return Math.floor(now.getTime() / 1000) + 30 * 60;
+  if (choice === "60") return Math.floor(now.getTime() / 1000) + 60 * 60;
+  const t = new Date(now);
+  if (now.getHours() >= 5) t.setDate(t.getDate() + 1);
+  t.setHours(8, 0, 0, 0);
+  return Math.floor(t.getTime() / 1000);
+}
+
+// How long Busy has left, short: "24m", "1h 10m", "till 8:00".
+function busyLeft(until) {
+  if (!until) return "";
+  const end = new Date(until * 1000);
+  const mins = Math.ceil((end - Date.now()) / 60000);
+  if (mins <= 0) return "";
+  if (end.toDateString() !== new Date().toDateString()) return `till ${end.getHours()}:${String(end.getMinutes()).padStart(2, "0")}`;
+  return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h${mins % 60 ? ` ${mins % 60}m` : ""}`;
+}
+// While Busy, the open island shows a countdown ring instead of the people list.
+const RING_R = 44;
+const RING_C = 2 * Math.PI * RING_R;
+function ringParts() {
+  const { busy_until: until = 0, busy_since: since = 0 } = state.me;
+  const now = Date.now() / 1000;
+  const left = Math.max(0, until - now);
+  const total = Math.max(1, until - (since || now));
+  const s = Math.floor(left);
+  const time = s >= 3600
+    ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+    : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return { time, offset: RING_C * (1 - Math.min(1, left / total)) };
+}
+function busyRingHtml() {
+  const { time, offset } = ringParts();
+  const end = new Date((state.me.busy_until || 0) * 1000);
+  const at = end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const when = end.toDateString() === new Date().toDateString() ? at : `tomorrow ${at}`;
+  return `
+    <div class="busy-view">
+      <div class="busy-ring">
+        <svg viewBox="0 0 110 110" aria-hidden="true">
+          <circle class="track" cx="55" cy="55" r="${RING_R}"/>
+          <circle class="arc" cx="55" cy="55" r="${RING_R}" transform="rotate(-90 55 55)" style="stroke-dasharray:${RING_C};stroke-dashoffset:${offset}"/>
+        </svg>
+        <div class="ring-text"><b class="ring-time">${time}</b><span>left</span></div>
+      </div>
+      <div class="busy-note">Calls are paused until ${esc(when)}</div>
+      <div class="busy-acts">
+        <button class="team" data-act="busy-people" data-v="on">Team members</button>
+        <button class="go-avail" data-act="status" data-v="available">I'm available</button>
+      </div>
+    </div>`;
+}
+// Tick the ring in place every second (no re-render, so nothing jumps).
+setInterval(() => {
+  if (currentMode() !== "open" || state.me.status !== "busy") return;
+  const t = content.querySelector(".ring-time");
+  const arc = content.querySelector(".busy-ring .arc");
+  if (!t || !arc) return;
+  const { time, offset } = ringParts();
+  t.textContent = time;
+  arc.style.strokeDashoffset = offset;
+}, 1000);
+
+const busyLabel = (status, until) => (status === "busy" && busyLeft(until) ? `Busy · ${busyLeft(until)}` : LABEL[status] || "");
 let clearTimer = null;
 let shownHtml = ""; // what's in the island now; unchanged content is never rebuilt, so a click can't land on a replaced button
 const REFRESH_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>`;
@@ -64,15 +134,15 @@ function outgoingHtml() {
 
 function noticeHtml() {
   const { name, answer } = notice;
-  const icon = { coming: "✓", busy: "✕", missed: "–" }[answer] || "•";
-  const text = { coming: "Accepted", busy: "Busy", missed: "No answer" }[answer] || answer;
+  const icon = { coming: "✓", busy: "✕", missed: "–", update: "↻" }[answer] || "•";
+  const text = { coming: "Accepted", busy: "Busy", missed: "No answer", update: "…" }[answer] || answer;
   if (screen.notch) {
     return compact(
       `<span class="icon ${esc(answer)}">${icon}</span><span class="ellipsis">${esc(name)}</span>`,
       `<span>${esc(text)}</span>`
     );
   }
-  const long = { coming: `${name} accepted`, busy: `${name} is busy right now`, missed: `${name} didn't answer` }[answer] || `${name}: ${answer}`;
+  const long = { update: `${name}…`, coming: `${name} accepted`, busy: `${name} is busy right now`, missed: `${name} didn't answer` }[answer] || `${name}: ${answer}`;
   return compact(`<span class="icon ${esc(answer)}">${icon}</span><span class="ellipsis">${esc(long)}</span>`, "");
 }
 
@@ -232,21 +302,28 @@ function openHtml() {
   const next = status === "available" ? "busy" : "available";
 
   // Availability is one button that always shows its colour and word; a click swaps it.
-  const statusSwitch = `<button class="avail ${status}" data-act="status" data-v="${next}" title="Switch to ${LABEL[next]}"><span class="dot ${status}"></span>${LABEL[status]}</button>`;
+  const statusSwitch = status === "busy"
+    ? `<button class="avail busy" data-act="status" data-v="available" title="Back to Available"><span class="dot busy"></span>${esc(busyLabel("busy", state.me.busy_until))}</button>`
+    : `<button class="avail available${busyMenu ? " open" : ""}" data-act="busy-menu" title="Set Busy for a while"><span class="dot available"></span>Available</button>`;
+  const busyFor = busyMenu && status !== "busy"
+    ? `<div class="busyfor"><span>Busy for</span><button data-act="busy-for" data-v="30">30 min</button><button data-act="busy-for" data-v="60">1 hour</button><button data-act="busy-for" data-v="tomorrow" title="Until 8:00 tomorrow">Tomorrow</button></div>`
+    : "";
   const refreshBtn = `<button class="ghost refresh${refreshing ? " spin" : ""}" data-act="refresh" title="Find teammates again">${REFRESH_ICON}</button>`;
   const you = `<span class="nm">${editingName
     ? `<input id="name" maxlength="40" value="${esc(name)}">`
     : `<span class="ellipsis" title="You"><b>${esc(name)}</b></span><button class="ghost pen" data-act="edit-name" title="Change name">✎</button>`}</span>`;
 
-  const people = state.peers.length
+  const showRing = status === "busy" && !busyPeople;
+  const backToRing = status === "busy" && busyPeople ? `<button class="ghost back-ring" data-act="busy-people" data-v="off">← Countdown</button>` : "";
+  const people = showRing ? busyRingHtml() : backToRing + (state.peers.length
     ? state.peers.map((p) => `
         <div class="row">
           <span class="dot ${p.status}"></span>
           <span class="name ellipsis">${esc(p.name)}</span>
-          <span class="st">${LABEL[p.status] || ""}</span>
+          <span class="st">${esc(busyLabel(p.status, p.until))}</span>
           <button data-act="call" data-id="${esc(p.id)}" ${p.status === "available" ? "" : "disabled"}>Call</button>
         </div>`).join("")
-    : `<div class="empty">No one yet. Teammates appear here<br>when they run FLiAI Quick Call on the same Wi-Fi.</div>`;
+    : `<div class="empty">No one yet. Teammates appear here<br>when they run FLiAI Quick Call on the same Wi-Fi.</div>`);
 
   const items = (state.activity || []).filter((ev) => Date.now() / 1000 - ev.at <= ROW_LIFE);
   const updates = items.length
@@ -274,13 +351,14 @@ function openHtml() {
         <div class="hc">${you}</div>
         <div class="hr">${refreshBtn}</div>
       </div>
+      ${busyFor}
       ${tabs}
       <div class="list">${tab === "updates" ? updates : people}</div>
       <div class="foot">
         <button class="toggle" data-act="activity" data-v="${updatesOn ? "off" : "on"}" aria-pressed="${updatesOn}" title="Show deployments, pull requests and issues">
           <span class="sw${updatesOn ? " on" : ""}"><i></i></span>Deployment updates
         </button>
-        <span class="ver">${version ? `v${esc(version)}` : ""}${latest ? `<span class="upd" title="Update available: run the update command"><i></i>v${esc(latest)}</span>` : ""}</span>
+        <span class="ver">${version ? `v${esc(version)}` : ""}${latest ? `<button class="upd" data-act="update" title="Install v${esc(latest)} now"><i></i>Update</button>` : ""}</span>
         <button class="ghost" data-act="quit">Quit</button>
       </div>
     </div>`;
@@ -457,7 +535,44 @@ function setContentWidth(w) {
 function setIsland(w, h, interactive) {
   island.style.width = `${w}px`;
   island.style.height = `${h}px`;
+  if (screen.linux) return setLinuxWindow(w + 2 * SHOULDER, h, interactive);
   invoke("resize", { width: w + 2 * SHOULDER, height: h, interactive });
+}
+
+// Linux (X11): the window is the island, plus a bigger invisible hover target while it's closed
+// (no global cursor there). Grow it before the morph, trim it after, so nothing gets clipped.
+const LINUX_HOT = { w: 240, h: 10 };
+const MORPH_MS = 760; // the longest open/close animation, see MOTION
+let linuxWin = { w: 0, h: 0 };
+let linuxTrim = null;
+function setLinuxWindow(w, h, interactive) {
+  const target = interactive ? { w, h } : { w: Math.max(w, LINUX_HOT.w), h: Math.max(h, LINUX_HOT.h) };
+  const grown = { w: Math.max(target.w, linuxWin.w), h: Math.max(target.h, linuxWin.h) };
+  clearTimeout(linuxTrim);
+  invoke("resize", { width: grown.w, height: grown.h, interactive });
+  linuxWin = grown;
+  linuxTrim = setTimeout(() => {
+    linuxWin = target;
+    invoke("resize", { width: target.w, height: target.h, interactive });
+  }, MORPH_MS);
+}
+
+// Linux: hover is the pointer entering or leaving the window itself, with the same short delays
+// the other platforms use.
+function linuxHover() {
+  let timer = null;
+  const set = (on, ms) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (hovering === on) return;
+      hovering = on;
+      if (!on) { busyMenu = false; busyPeople = false; }
+      if (on && tab === "updates") unread = 0;
+      render();
+    }, ms);
+  };
+  document.documentElement.addEventListener("mouseenter", () => set(true, 120));
+  document.documentElement.addEventListener("mouseleave", () => set(false, 300));
 }
 
 function wireNameInput() {
@@ -493,7 +608,11 @@ document.body.addEventListener("click", (e) => {
   if (!el) return;
   const { act, v, id } = el.dataset;
   switch (act) {
-    case "status": invoke("set_status", { status: v }); break;
+    case "status": busyMenu = false; invoke("set_status", { status: v, until: null }); break;
+    case "busy-menu": busyMenu = !busyMenu; render(); break;
+    case "busy-people": busyPeople = v === "on"; render(); break;
+    case "busy-for": busyMenu = false; invoke("set_status", { status: "busy", until: busyUntil(v) }); break;
+    case "update": invoke("update_now"); break;
     case "edit-name": editingName = true; invoke("focus_island"); render(); break;
     case "call": invoke("call_peer", { id }); break;
     case "cancel": invoke("cancel_call"); break;
@@ -524,10 +643,12 @@ document.body.addEventListener("click", (e) => {
 });
 
 listen("update", (e) => { latest = e.payload.latest; render(); });
+listen("updating", (e) => showNotice({ name: e.payload.latest ? `Updating to v${e.payload.latest}` : "Updating", answer: "update", color: "" }));
 listen("activity", (e) => showActivity(e.payload));
 // Keep the Updates tab honest while it's open: ages tick, a silent deploy turns to "no result yet".
-setInterval(() => { if (currentMode() === "open" && tab === "updates") render(); }, 30000);
-listen("hover", (e) => { hovering = e.payload; if (hovering && tab === "updates") unread = 0; render(); });
+// ...and the Busy countdowns on the People tab.
+setInterval(() => { if (currentMode() === "open" && !editingName) render(); }, 30000);
+listen("hover", (e) => { hovering = e.payload; if (!hovering) { busyMenu = false; busyPeople = false; } if (hovering && tab === "updates") unread = 0; render(); });
 listen("state", (e) => { state = e.payload; render(); });
 listen("incoming", (e) => { incoming = e.payload; render(); });
 listen("incoming-end", () => { incoming = null; render(); });
@@ -541,5 +662,6 @@ window.__TAURI__.app?.getVersion().then((v) => { version = v; render(); }).catch
 Promise.all([invoke("get_screen"), invoke("get_state")]).then(([sc, st]) => {
   screen = sc;
   state = st;
+  if (screen.linux) linuxHover();
   render();
 });

@@ -1,8 +1,9 @@
 #!/bin/sh
-# FLiAI Quick Call installer / updater for macOS. Run:
+# FLiAI Quick Call installer / updater for macOS and Linux. Run:
 #   curl -fsSL https://cdn-quickcall.fliai.lk/install.sh | sh     (first install)
 #   curl -fsSL https://cdn-quickcall.fliai.lk/update.sh | sh      (update; same script)
 # Downloading with curl skips the macOS "unverified developer" warning.
+# Linux installs into your home folder (no sudo), so the app can update itself.
 set -e
 
 BASE="https://cdn-quickcall.fliai.lk"
@@ -61,40 +62,111 @@ download() {
 }
 
 # ---------- install ----------
-DEST="/Applications"
-[ -d "$DEST/$APP" ] || [ -w "$DEST" ] || DEST="$HOME/Applications"
-[ -d "$DEST/$APP" ] || [ ! -d "$HOME/Applications/$APP" ] || DEST="$HOME/Applications"
-
-printf '\n  %sFLiAI Quick Call%s\n\n' "$B" "$N"
-
 latest=$(curl -fsSL "$BASE/latest.json" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
-installed=$(defaults read "$DEST/$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || true)
-if [ -n "$latest" ] && [ "$latest" = "$installed" ]; then
-  ok "FLiAI Quick Call $installed is already up to date."
-  echo
-  exit 0
-fi
 
-TMP=$(mktemp -d)
-cleanup() { hdiutil detach -quiet "$TMP/mnt" 2>/dev/null || true; rm -rf "$TMP"; }
-trap cleanup EXIT
+header() {
+  printf '\n  %sFLiAI Quick Call%s\n\n' "$B" "$N"
+  if [ -n "$latest" ] && [ "$latest" = "$installed" ]; then
+    ok "FLiAI Quick Call $installed is already up to date."
+    echo
+    exit 0
+  fi
+}
 
-if [ -n "$installed" ]; then
-  printf '  Updating %s%s%s → %s%s%s\n\n' "$D" "$installed" "$N" "$G" "$latest" "$N"
-else
-  printf '  Installing version %s%s%s\n\n' "$G" "$latest" "$N"
-fi
+intro() {
+  if [ -n "$installed" ]; then
+    printf '  Updating %s%s%s → %s%s%s\n\n' "$D" "$installed" "$N" "$G" "$latest" "$N"
+  else
+    printf '  Installing version %s%s%s\n\n' "$G" "$latest" "$N"
+  fi
+}
 
-download "$BASE/fliai-quick-call.dmg" "$TMP/app.dmg"
-step "Unpacking" hdiutil attach -quiet -nobrowse -readonly -mountpoint "$TMP/mnt" "$TMP/app.dmg"
+# If the app was closed for an update (by this script, or by the app itself before running it)
+# and something then failed, reopen whatever version is installed so nobody is left without it.
+reopen_if_needed() {
+  [ -n "$QC_REOPEN$closed" ] || return 0
+  is_running && return 0
+  start_app >/dev/null 2>&1 || true
+}
 
-mkdir -p "$DEST"
-quit_app() { osascript -e 'quit app "FLiAI Quick Call"' || true; sleep 1; }
-[ -n "$installed" ] && step "Closing the running app" quit_app
+install_mac() {
+  DEST="/Applications"
+  [ -d "$DEST/$APP" ] || [ -w "$DEST" ] || DEST="$HOME/Applications"
+  [ -d "$DEST/$APP" ] || [ ! -d "$HOME/Applications/$APP" ] || DEST="$HOME/Applications"
+  installed=$(defaults read "$DEST/$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || true)
+  is_running() { pgrep -f "$APP/Contents/MacOS" >/dev/null 2>&1; }
+  start_app() { [ -d "$DEST/$APP" ] && open "$DEST/$APP"; }
+  header
 
-copy_app() { rm -rf "$DEST/$APP" && cp -R "$TMP/mnt/$APP" "$DEST/" && { xattr -dr com.apple.quarantine "$DEST/$APP" 2>/dev/null || true; }; }
-step "Installing to $DEST" copy_app
-step "Starting FLiAI Quick Call" open "$DEST/$APP"
+  TMP=$(mktemp -d)
+  cleanup() { hdiutil detach -quiet "$TMP/mnt" 2>/dev/null || true; rm -rf "$TMP"; reopen_if_needed; }
+  trap cleanup EXIT
+  intro
 
-printf '\n  %sDone!%s Move your mouse to the top center of the screen to open it.\n' "$G$B" "$N"
-printf '  %sIt starts by itself when you log in.%s\n\n' "$D" "$N"
+  download "$BASE/fliai-quick-call.dmg" "$TMP/app.dmg"
+  step "Unpacking" hdiutil attach -quiet -nobrowse -readonly -mountpoint "$TMP/mnt" "$TMP/app.dmg"
+
+  mkdir -p "$DEST"
+  quit_app() { osascript -e 'quit app "FLiAI Quick Call"' || true; sleep 1; }
+  if [ -n "$installed" ]; then closed=1; step "Closing the running app" quit_app; fi
+
+  copy_app() { rm -rf "$DEST/$APP" && cp -R "$TMP/mnt/$APP" "$DEST/" && { xattr -dr com.apple.quarantine "$DEST/$APP" 2>/dev/null || true; }; }
+  step "Installing to $DEST" copy_app
+  step "Starting FLiAI Quick Call" open "$DEST/$APP"
+
+  printf '\n  %sDone!%s Move your mouse to the top center of the screen to open it.\n' "$G$B" "$N"
+  printf '  %sIt starts by itself when you log in.%s\n\n' "$D" "$N"
+}
+
+install_linux() {
+  case "$(uname -m)" in x86_64|amd64) ;; *) printf '\n'; fail "The Linux version is for 64-bit Intel/AMD PCs (x86_64) only.";; esac
+  DIR="$HOME/.local/share/fliai-quick-call"
+  BIN="$DIR/fliai-quick-call"
+  installed=$(cat "$DIR/VERSION" 2>/dev/null || true)
+  is_running() { pgrep -f "$BIN" >/dev/null 2>&1; }
+  start_app() { [ -x "$BIN" ] && [ -n "$DISPLAY$WAYLAND_DISPLAY" ] && { setsid "$BIN" >/dev/null 2>&1 < /dev/null & }; }
+  header
+
+  # The one thing it needs from the system: the web view library (on most Ubuntu desktops already).
+  if ! { /sbin/ldconfig -p 2>/dev/null || ldconfig -p 2>/dev/null; } | grep -q 'libwebkit2gtk-4\.1\.so\.0'; then
+    printf '  %sFLiAI Quick Call needs the WebKitGTK web view. Install it with:%s\n\n' "$R" "$N"
+    printf '    sudo apt install libwebkit2gtk-4.1-0\n\n'
+    printf '  then run this command again.\n\n'
+    exit 1
+  fi
+
+  TMP=$(mktemp -d)
+  cleanup() { rm -rf "$TMP"; reopen_if_needed; }
+  trap cleanup EXIT
+  intro
+
+  download "$BASE/fliai-quick-call-linux-x86_64.tar.gz" "$TMP/app.tar.gz"
+  step "Unpacking" tar -xzf "$TMP/app.tar.gz" -C "$TMP"
+
+  stop_app() { pkill -f "$BIN" 2>/dev/null || true; sleep 1; }
+  if is_running; then closed=1; step "Closing the running app" stop_app; fi
+
+  place() {
+    mkdir -p "$DIR" "$HOME/.local/bin" "$HOME/.local/share/applications" &&
+    install -m 755 "$TMP/fliai-quick-call" "$BIN.new" && mv -f "$BIN.new" "$BIN" &&
+    install -m 644 "$TMP/icon.png" "$DIR/icon.png" &&
+    ln -sf "$BIN" "$HOME/.local/bin/fliai-quick-call" &&
+    printf '[Desktop Entry]\nType=Application\nName=FLiAI Quick Call\nComment=Tap a teammate on the shoulder over the office network\nExec=%s\nIcon=%s\nCategories=Office;Network;\nTerminal=false\n' "$BIN" "$DIR/icon.png" > "$HOME/.local/share/applications/fliai-quick-call.desktop" &&
+    printf '%s\n' "$latest" > "$DIR/VERSION"
+  }
+  step "Installing to ~/.local/share/fliai-quick-call" place
+
+  if [ -n "$DISPLAY$WAYLAND_DISPLAY" ]; then
+    step "Starting FLiAI Quick Call" start_app
+    printf '\n  %sDone!%s Move your mouse to the top center of the screen to open it.\n' "$G$B" "$N"
+  else
+    printf '\n  %sDone!%s Open FLiAI Quick Call from your apps menu.\n' "$G$B" "$N"
+  fi
+  printf '  %sIt starts by itself when you log in.%s\n\n' "$D" "$N"
+}
+
+case "$(uname -s)" in
+  Darwin) install_mac ;;
+  Linux) install_linux ;;
+  *) printf '\n'; fail "FLiAI Quick Call runs on macOS, Windows and Linux. On Windows, use the PowerShell command." ;;
+esac

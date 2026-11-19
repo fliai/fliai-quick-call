@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -41,6 +41,12 @@ struct Me {
     id: String,
     name: String,
     status: String, // "available" | "busy"
+    /// When Busy ends (unix seconds). Busy always has an end, so nobody stays stuck on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    busy_until: Option<u64>,
+    /// When Busy started, for the countdown ring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    busy_since: Option<u64>,
     /// "Deployment updates": show deploy / PR / issue activity. Off until the person turns it on.
     #[serde(default)]
     activity: bool,
@@ -49,6 +55,7 @@ struct Me {
 struct Peer {
     name: String,
     status: String,
+    until: Option<u64>, // when their Busy ends, if they told us
     addr: SocketAddr,
     online: bool,
     misses: u8,
@@ -128,6 +135,8 @@ struct Screen {
     notch: bool,
     notch_width: f64,
     notch_height: f64,
+    /// Linux: the UI sizes the window to the island and handles hover itself (no global cursor).
+    linux: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -135,6 +144,8 @@ struct PeerView {
     id: String,
     name: String,
     status: String, // "available" | "busy" | "offline"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until: Option<u64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -157,6 +168,7 @@ fn view(s: &State) -> StateView {
             id: id.clone(),
             name: p.name.clone(),
             status: if p.online { p.status.clone() } else { "offline".into() },
+            until: if p.online && p.status == "busy" { p.until } else { None },
         })
         .collect();
     peers.sort_by(|a, b| rank(&a.status).cmp(&rank(&b.status)).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
@@ -196,6 +208,8 @@ fn load_config(path: &PathBuf) -> Me {
         id: format!("{:x}{:x}", nanos, std::process::id()),
         name: name.into_iter().collect(),
         status: "available".into(),
+        busy_until: None,
+        busy_since: None,
         activity: false,
     }
 }
@@ -215,7 +229,15 @@ fn clean(s: &str, max: usize) -> String {
 #[serde(tag = "t", rename_all = "lowercase")]
 enum Msg {
     Info,
-    Hello { id: String, name: String, status: String, port: u16 },
+    Hello {
+        id: String,
+        name: String,
+        status: String,
+        port: u16,
+        /// When their Busy ends. Optional: older versions neither send nor expect it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<u64>,
+    },
     Call { id: String, name: String, port: u16 },
     Cancel { id: String },
     Reply { id: String, name: String, answer: String },
@@ -243,7 +265,8 @@ fn send_with(addr: SocketAddr, msg: &Msg, reply_timeout: Duration) -> std::io::R
 }
 
 fn hello_msg(s: &State, status: &str) -> Msg {
-    Msg::Hello { id: s.me.id.clone(), name: s.me.name.clone(), status: status.into(), port: s.port }
+    let until = if status == "busy" { s.me.busy_until } else { None };
+    Msg::Hello { id: s.me.id.clone(), name: s.me.name.clone(), status: status.into(), port: s.port, until }
 }
 
 fn broadcast_hello(shared: &Shared, status: Option<&str>) {
@@ -260,7 +283,7 @@ fn broadcast_hello(shared: &Shared, status: Option<&str>) {
     });
 }
 
-fn upsert_peer(shared: &Shared, id: String, name: String, status: String, addr: SocketAddr) {
+fn upsert_peer(shared: &Shared, id: String, name: String, status: String, until: Option<u64>, addr: SocketAddr) {
     let mut s = shared.lock().unwrap();
     if id == s.me.id {
         return;
@@ -271,13 +294,14 @@ fn upsert_peer(shared: &Shared, id: String, name: String, status: String, addr: 
     if online && !s.peers.contains_key(&id) {
         s.peers.retain(|_, p| p.addr != addr && (p.online || !p.name.eq_ignore_ascii_case(&name)));
     }
-    let p = s.peers.entry(id).or_insert(Peer { name: String::new(), status: String::new(), addr, online, misses: 0, synced: (0, 0) });
+    let p = s.peers.entry(id).or_insert(Peer { name: String::new(), status: String::new(), until: None, addr, online, misses: 0, synced: (0, 0) });
     p.name = name;
     p.addr = addr;
     p.online = online;
     p.misses = 0;
     if online {
         p.status = status;
+        p.until = until;
     }
 }
 
@@ -312,10 +336,10 @@ fn handle_conn(app: AppHandle, shared: Shared, mut stream: TcpStream) {
     let reply = match msg {
         Msg::Info => {
             let s = shared.lock().unwrap();
-            json!({ "id": s.me.id, "name": s.me.name, "status": s.me.status, "port": s.port, "act": activity_digest(&s.activity).to_string() })
+            json!({ "id": s.me.id, "name": s.me.name, "status": s.me.status, "until": s.me.busy_until, "port": s.port, "act": activity_digest(&s.activity).to_string() })
         }
-        Msg::Hello { id, name, status, port } => {
-            upsert_peer(&shared, clean(&id, 64), clean(&name, 40), clean(&status, 16), SocketAddr::new(ip, port));
+        Msg::Hello { id, name, status, port, until } => {
+            upsert_peer(&shared, clean(&id, 64), clean(&name, 40), clean(&status, 16), until, SocketAddr::new(ip, port));
             push_state(&app, &shared);
             json!({})
         }
@@ -583,6 +607,21 @@ fn play_sound() {
         // SND_MEMORY plays straight from the bytes; they're static, so async playback is safe.
         unsafe { PlaySoundW(CHIME.as_ptr() as *const u16, std::ptr::null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) };
     }
+    #[cfg(target_os = "linux")]
+    {
+        let path = std::env::temp_dir().join("fliai-quickcall-chime.wav");
+        if std::fs::metadata(&path).map(|m| m.len()).ok() != Some(CHIME.len() as u64) {
+            let _ = std::fs::write(&path, CHIME);
+        }
+        // PipeWire (Ubuntu's default), then PulseAudio, then plain ALSA: whichever is installed.
+        let p = path.to_string_lossy().to_string();
+        let players: [(&str, Vec<&str>); 3] = [("pw-play", vec!["--volume", "0.5", &p]), ("paplay", vec!["--volume=32768", &p]), ("aplay", vec!["-q", &p])];
+        for (player, args) in players {
+            if std::process::Command::new(player).args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok() {
+                break;
+            }
+        }
+    }
 }
 
 // ---------- windows ----------
@@ -658,7 +697,7 @@ fn detect_notch() -> Screen {
         return Screen::default();
     }
     let (left, right) = (s.auxiliaryTopLeftArea(), s.auxiliaryTopRightArea());
-    Screen { notch: true, notch_width: s.frame().size.width - left.size.width - right.size.width, notch_height: top }
+    Screen { notch: true, notch_width: s.frame().size.width - left.size.width - right.size.width, notch_height: top, linux: false }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -705,6 +744,25 @@ fn place_island(app: &AppHandle, width: f64, height: f64, interactive: bool) {
         center += 460.0; // second test instance on the same machine
     }
     let top = pos.y as f64 / scale;
+
+    // Linux (X11): no global cursor or click-through, so the window is just the island (or its
+    // hover target) and the UI grows it before animating; hover comes from the window itself.
+    #[cfg(target_os = "linux")]
+    {
+        let (win_x, win_y) = (center - width / 2.0, top);
+        let geo = app.state::<SharedGeo>();
+        let mut g = geo.lock().unwrap();
+        if !g.placed || g.w != width || g.h != height {
+            let _ = pill.set_size(LogicalSize::new(width, height));
+        }
+        if !g.placed || g.win_x != win_x || g.win_y != win_y {
+            let _ = pill.set_position(LogicalPosition::new(win_x, win_y));
+        }
+        *g = Geo { x: win_x, y: top, w: width, h: height, interactive, scale, hot_x: win_x, hot_w: width, hot_h: height, win_x, win_y, placed: true };
+        return;
+    }
+
+    #[allow(unreachable_code)]
     let (win_x, win_y) = (center - WIN_W / 2.0, top);
 
     let geo = app.state::<SharedGeo>();
@@ -780,19 +838,54 @@ fn get_state(shared: tauri::State<Shared>) -> StateView {
     view(&shared.lock().unwrap())
 }
 
+/// Busy can last at most this long ("until tomorrow" set late at night still fits).
+const BUSY_MAX_SECS: u64 = 36 * 60 * 60;
+
+/// `until` (unix seconds) is when Busy ends; the UI works it out from the person's local clock
+/// (30 min, 1 hour, tomorrow 8:00). Busy without a sane end gets one hour.
 #[tauri::command]
-fn set_status(app: AppHandle, shared: tauri::State<Shared>, status: String) {
+fn set_status(app: AppHandle, shared: tauri::State<Shared>, status: String, until: Option<u64>) {
     if status != "available" && status != "busy" {
         return;
     }
+    let now = now_secs();
+    let until = (status == "busy").then(|| until.filter(|u| *u > now && *u <= now + BUSY_MAX_SECS).unwrap_or(now + 60 * 60));
     {
         let mut s = shared.lock().unwrap();
         s.me.status = status;
+        s.me.busy_since = until.map(|_| now);
+        s.me.busy_until = until;
         save_config(&s);
     }
     push_state(&app, &shared);
     let shared = shared.inner().clone();
     thread::spawn(move || broadcast_hello(&shared, None));
+}
+
+/// Back to Available when Busy runs out (also right after launch, if it ran out while closed).
+fn expire_busy(app: &AppHandle, shared: &Shared) {
+    let expired = {
+        let mut s = shared.lock().unwrap();
+        let over = s.me.status == "busy" && s.me.busy_until.is_none_or(|u| u <= now_secs());
+        if over {
+            s.me.status = "available".into();
+            s.me.busy_until = None;
+            s.me.busy_since = None;
+            save_config(&s);
+        }
+        over
+    };
+    if expired {
+        push_state(app, shared);
+        broadcast_hello(shared, None);
+    }
+}
+
+fn start_busy_expiry(app: AppHandle, shared: Shared) {
+    thread::spawn(move || loop {
+        expire_busy(&app, &shared);
+        thread::sleep(Duration::from_secs(15));
+    });
 }
 
 #[tauri::command]
@@ -903,7 +996,7 @@ fn refresh(app: AppHandle, shared: tauri::State<Shared>) {
     thread::spawn(move || {
         browse(&app, &shared);
         poll_once(&app, &shared);
-        check_update(&app);
+        let _ = check_update(&app);
     });
 }
 
@@ -913,24 +1006,120 @@ const LATEST_URL: &str = "https://cdn-quickcall.fliai.lk/latest.json";
 const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Look for a newer version shortly after launch (once the network is up), then every few hours.
-fn start_update_checks(app: AppHandle) {
+/// When there is one, install it on its own as soon as nobody is in the middle of using the app:
+/// people don't run update commands, so updates have to happen by themselves.
+fn start_update_checks(app: AppHandle, shared: Shared) {
     // The Microsoft Store version updates itself through the Store.
-    if std::env::current_exe().is_ok_and(|p| p.to_string_lossy().to_lowercase().contains("\\windowsapps\\")) {
+    if is_store_build() {
         return;
     }
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(10));
         loop {
-            check_update(&app);
+            if let Some(latest) = check_update(&app) {
+                // Wait (up to the next check) until no call is going and the island is closed.
+                let since = Instant::now();
+                while since.elapsed() < UPDATE_CHECK_EVERY {
+                    if is_quiet(&app, &shared) {
+                        run_update(&app, Some(&latest));
+                        break;
+                    }
+                    thread::sleep(Duration::from_secs(60));
+                }
+            }
             thread::sleep(UPDATE_CHECK_EVERY);
         }
     });
 }
 
+fn is_store_build() -> bool {
+    std::env::current_exe().is_ok_and(|p| p.to_string_lossy().to_lowercase().contains("\\windowsapps\\"))
+}
+
+/// Not ringing, not calling, island not open: a good moment to restart into a new version.
+fn is_quiet(app: &AppHandle, shared: &Shared) -> bool {
+    let calm = {
+        let s = shared.lock().unwrap();
+        s.incoming.is_none() && s.outgoing.is_none()
+    };
+    calm && !app.state::<SharedGeo>().lock().unwrap().interactive
+}
+
+static UPDATING: AtomicBool = AtomicBool::new(false);
+
+/// The "Update" button next to the green dot.
+#[tauri::command]
+fn update_now(app: AppHandle) {
+    if !is_store_build() {
+        thread::spawn(move || run_update(&app, None));
+    }
+}
+
+/// Run the same update script people use from the terminal, in the background. It downloads
+/// the new version, replaces the app and opens it; if anything fails it reopens this version.
+fn run_update(app: &AppHandle, latest: Option<&str>) {
+    if cfg!(debug_assertions) || UPDATING.swap(true, Ordering::SeqCst) {
+        return; // never replace the installed app from a dev build; never update twice at once
+    }
+    let _ = app.emit("updating", json!({ "latest": latest.map(|v| clean(v, 20)) }));
+    thread::sleep(Duration::from_millis(2500)); // let "Updating…" show
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let started = {
+        use std::os::unix::process::CommandExt;
+        #[cfg(target_os = "macos")]
+        let log = "$HOME/Library/Logs";
+        #[cfg(target_os = "linux")]
+        let log = "${XDG_STATE_HOME:-$HOME/.local/state}";
+        // Its own process group, so it outlives this app (launchd ends the app's group when the
+        // app exits). Output goes to ~/Library/Logs for troubleshooting.
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("mkdir -p \"{log}\"; curl -fsSL https://cdn-quickcall.fliai.lk/update.sh | sh >> \"{log}/fliai-quickcall-update.log\" 2>&1"))
+            .env("QC_REOPEN", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .is_ok()
+    };
+    #[cfg(target_os = "windows")]
+    let started = {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "& { irm https://cdn-quickcall.fliai.lk/update.ps1 | iex } *> \"$env:TEMP\\fliai-quickcall-update.log\"",
+            ])
+            .creation_flags(0x08000000 | 0x00000200) // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+            .spawn()
+            .is_ok()
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let started = false;
+
+    if !started {
+        UPDATING.store(false, Ordering::SeqCst);
+        return;
+    }
+    // macOS/Linux: step aside so the script can replace the app (status 0, so the macOS login
+    // item doesn't restart this old copy). Windows: the script closes the app itself.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        thread::sleep(Duration::from_millis(800));
+        app.exit(0);
+    }
+}
+
 /// Fetch latest.json with the system's curl (built into macOS and Windows 10/11, so no HTTP
 /// library is needed; the CDN doesn't allow the web view to fetch it directly). Tells the UI
 /// the latest version if it's newer than this one.
-fn check_update(app: &AppHandle) {
+fn check_update(app: &AppHandle) -> Option<String> {
     let mut cmd = std::process::Command::new("curl");
     cmd.args(["-fsSL", "--max-time", "10", LATEST_URL]);
     #[cfg(target_os = "windows")]
@@ -938,14 +1127,16 @@ fn check_update(app: &AppHandle) {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-    let Ok(out) = cmd.output() else { return };
-    let Some(latest) = serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| v["version"].as_str().map(str::to_string)) else {
-        return;
-    };
+    // Offline, curl missing, server down: all just mean "no update known right now".
+    let out = cmd.output().ok()?;
+    let latest = serde_json::from_slice::<Value>(&out.stdout).ok()?["version"].as_str().map(|v| clean(v, 20))?;
     let parse = |v: &str| v.split('.').map(|n| n.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
     let current = app.package_info().version.to_string();
     if parse(&latest) > parse(&current) {
-        let _ = app.emit("update", json!({ "latest": clean(&latest, 20) }));
+        let _ = app.emit("update", json!({ "latest": latest }));
+        Some(latest)
+    } else {
+        None
     }
 }
 
@@ -1000,7 +1191,8 @@ fn browse(app: &AppHandle, shared: &Shared) {
             thread::spawn(move || {
                 if let Ok(info) = send(addr, &Msg::Info) {
                     let get = |k: &str| info.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-                    upsert_peer(&shared, id, clean(&get("name"), 40), clean(&get("status"), 16), addr);
+                    let until = info.get("until").and_then(Value::as_u64);
+                    upsert_peer(&shared, id, clean(&get("name"), 40), clean(&get("status"), 16), until, addr);
                     push_state(&app, &shared);
                 }
                 let hello = {
@@ -1045,13 +1237,15 @@ fn poll_once(app: &AppHandle, shared: &Shared) {
                     Some(info) => {
                         let name = clean(info.get("name").and_then(Value::as_str).unwrap_or_default(), 40);
                         let status = clean(info.get("status").and_then(Value::as_str).unwrap_or_default(), 16);
-                        if !p.online || p.name != name || p.status != status {
+                        let until = info.get("until").and_then(Value::as_u64);
+                        if !p.online || p.name != name || p.status != status || p.until != until {
                             changed = true;
                         }
                         p.online = true;
                         p.misses = 0;
                         p.name = name;
                         p.status = status;
+                        p.until = until;
                         // Their updates list differs from ours (they or we missed something):
                         // send ours once per difference; they merge what moves a row forward.
                         // Peers on an older version send no digest and are left alone.
@@ -1111,6 +1305,7 @@ fn register_login_item() {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>10</integer>
+  <key>AbandonProcessGroup</key><true/>
   <key>ProcessType</key><string>Interactive</string>
   <key>LimitLoadToSessionType</key><string>Aqua</string>
 </dict>
@@ -1125,6 +1320,18 @@ fn register_login_item() {
 }
 
 fn main() {
+    // Linux: Wayland doesn't let an app place its window or keep it on top, which the island
+    // needs, so run through XWayland (built into Ubuntu). WebKitGTK's DMA-BUF renderer breaks
+    // transparent windows on some GPUs. Both only if the person hasn't set them already.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        if std::env::var_os("GDK_BACKEND").is_none() {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
     let mut builder = tauri::Builder::default();
     // One copy per user. The island is invisible until hovered, so people often launch the app
     // again thinking it's closed; a second copy would advertise itself from another port.
@@ -1142,7 +1349,7 @@ fn main() {
     }
     builder
         .invoke_handler(tauri::generate_handler![
-            get_state, get_screen, set_status, set_name, set_activity, call_peer, cancel_call, answer, resize, focus_island, refresh, quit
+            get_state, get_screen, set_status, set_name, set_activity, call_peer, cancel_call, answer, resize, focus_island, refresh, update_now, quit
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -1178,12 +1385,13 @@ fn main() {
             app.manage(shared.clone());
             let geo: SharedGeo = Arc::default();
             app.manage(geo.clone());
-            app.manage(detect_notch());
+            app.manage(Screen { linux: cfg!(target_os = "linux"), ..detect_notch() });
 
             let handle = app.handle().clone();
             let port = start_server(handle.clone(), shared.clone());
             shared.lock().unwrap().port = port;
             start_discovery(handle.clone(), shared.clone());
+            let (shared_for_updates, shared_for_busy) = (shared.clone(), shared.clone());
             start_polling(handle.clone(), shared);
 
             place_island(&handle, 1.0, 4.0, false); // the UI sizes it once loaded
@@ -1192,8 +1400,12 @@ fn main() {
                 raise(&pill, ISLAND_LEVEL);
                 let _ = pill.show();
             }
-            start_update_checks(handle.clone());
+            start_update_checks(handle.clone(), shared_for_updates);
+            start_busy_expiry(handle.clone(), shared_for_busy);
+            #[cfg(not(target_os = "linux"))]
             start_hover_watch(handle, geo);
+            #[cfg(target_os = "linux")]
+            let _ = geo;
             Ok(())
         })
         .run(tauri::generate_context!())

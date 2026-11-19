@@ -28,6 +28,12 @@ jobs:
             rust_targets: ""
             file: src-tauri/target/release/bundle/nsis/*-setup.exe
             out: fliai-quick-call-setup.exe
+          # Built on 24.04 so it runs on Ubuntu 24.04 and newer (26.04 included).
+          - os: ubuntu-24.04
+            args: --no-bundle
+            rust_targets: ""
+            file: src-tauri/target/release/fliai-quick-call
+            out: fliai-quick-call-linux-x86_64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -54,13 +60,27 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev build-essential
+
       - run: npm ci
 
       - run: npx tauri build ${{ matrix.args }}
 
       - name: Give the installer a fixed name
         shell: bash
-        run: mkdir dist && cp ${{ matrix.file }} "dist/${{ matrix.out }}"
+        run: |
+          mkdir dist
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # The binary (web UI is built in) plus its icon; install.sh puts them in ~/.local.
+            mkdir pkg && cp ${{ matrix.file }} pkg/ && cp src-tauri/icons/icon.png pkg/
+            tar -czf "dist/${{ matrix.out }}" -C pkg .
+          else
+            cp ${{ matrix.file }} "dist/${{ matrix.out }}"
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
@@ -141,9 +161,10 @@ jobs:
 
       - name: Upload (installers first, then metadata and scripts)
         run: |
-          for f in fliai-quick-call.dmg fliai-quick-call-setup.exe latest.json install.sh install.ps1 update.sh update.ps1 uninstall.sh uninstall.ps1; do
+          for f in fliai-quick-call.dmg fliai-quick-call-setup.exe fliai-quick-call-linux-x86_64.tar.gz latest.json install.sh install.ps1 update.sh update.ps1 uninstall.sh uninstall.ps1; do
             case "$f" in
               *.dmg)  type=application/x-apple-diskimage ;;
+              *.gz)   type=application/gzip ;;
               *.exe)  type=application/vnd.microsoft.portable-executable ;;
               *.json) type=application/json ;;
               *)      type="text/plain; charset=utf-8" ;;
@@ -184,3 +205,33 @@ jobs:
           $out = & { irm https://cdn-quickcall.fliai.lk/update.ps1 | iex } *>&1 | Out-String
           Write-Host $out
           if ($out -notmatch "already up to date") { exit 1 }
+
+  # The real one-line commands on Ubuntu: install (and check the app starts and keeps running,
+  # under a virtual display), update (should be up to date), uninstall (nothing left behind).
+  verify-linux:
+    needs: publish
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install the runtime the app needs, and a virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-0 xvfb
+
+      - name: Install, start, update, uninstall
+        run: |
+          set -e
+          xvfb-run -a sh -c '
+            curl -fsSL https://cdn-quickcall.fliai.lk/install.sh | sh
+            sleep 8
+            pgrep -f "$HOME/.local/share/fliai-quick-call/fliai-quick-call" >/dev/null || { echo "App is not running"; exit 1; }
+            echo "App is running."
+          '
+          v=$(cat "$HOME/.local/share/fliai-quick-call/VERSION")
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "Installed version $v != $GITHUB_REF_NAME"; exit 1; }
+          curl -fsSL https://cdn-quickcall.fliai.lk/update.sh | sh | tee out.txt
+          grep -q "already up to date" out.txt
+          curl -fsSL https://cdn-quickcall.fliai.lk/uninstall.sh | sh
+          for f in "$HOME/.local/share/fliai-quick-call" "$HOME/.local/bin/fliai-quick-call" "$HOME/.local/share/applications/fliai-quick-call.desktop"; do
+            [ ! -e "$f" ] || { echo "Left behind: $f"; exit 1; }
+          done
+          echo "Clean uninstall."
